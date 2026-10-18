@@ -1,5 +1,7 @@
 # Phase 4 — Early Activity Detection and Activity Lifecycle
 
+> **Phase 4.5 update:** The launch and App Server environment blockers were later resolved for validation, and nine live task runs were captured. See [PHASE4.5-VALIDATION-REPORT.md](PHASE4.5-VALIDATION-REPORT.md) for the updated runtime findings and timing results. The findings below describe the state at the end of Phase 4.
+
 ## Summary
 
 Phase 4 adds a low-confidence prediction from Codex's structured plan event, carries prediction and execution stages through the agent-neutral activity classifier, and separates a failed tool from a failed turn. Basic and Expressive still consume the same normalized events. The task prompt sent to Codex is unchanged.
