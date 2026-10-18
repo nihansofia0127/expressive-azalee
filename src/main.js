@@ -4,7 +4,7 @@ import { createAnimationController } from './animation-controller.js';
 import { createEventCollector } from './event-collector.js';
 import { createStateMapper } from './state-mapper.js';
 import { createCodexAdapter } from './codex-adapter.js';
-import { classifyActivity } from './activity-classifier.js';
+import { createActivityLifecycle } from './activity-lifecycle.js';
 import { PresentationMode, presentActivity } from './presentation-mode.js';
 import { activityFixtures } from './activity-fixtures.js';
 
@@ -18,6 +18,7 @@ const taskMessage = $('#task-message');
 const connectionIndicator = $('#connection-indicator');
 const approvalPanel = $('#approval-panel');
 const collector = createEventCollector();
+const activityLifecycle = createActivityLifecycle();
 let currentApproval = null;
 let currentMode = PresentationMode.BASIC;
 let latestClassification = { activity: 'IDLE', explanation: 'Waiting for an event.', evidence: [] };
@@ -34,7 +35,8 @@ const codex = createCodexAdapter({ onEvent: (event) => collector.accept(event) }
 collector.subscribe((event) => {
   if (!stateMapper.apply(event)) return;
   latestEvent = event;
-  latestClassification = classifyActivity(event);
+  latestClassification = activityLifecycle.apply(event);
+  if (!latestClassification) return;
   renderPresentation();
   $('#last-event').textContent = JSON.stringify({ ...event, timestamp: new Date(Number(event.timestamp)).toISOString() }, null, 2);
   if (event.eventType === 'connection.state') {
@@ -93,6 +95,7 @@ function finishTask() {
   stopButton.disabled = true;
   approvalPanel.hidden = true;
   currentApproval = null;
+  $('#activity-reporting').disabled = false;
 }
 
 function setManualBehavior(behavior) {
@@ -198,8 +201,9 @@ startButton.addEventListener('click', async () => {
   try {
     startButton.disabled = true;
     stopButton.disabled = false;
+    $('#activity-reporting').disabled = true;
     taskMessage.textContent = 'Starting Codex App Server…';
-    await codex.startTask(prompt, workspace);
+    await codex.startTask(prompt, workspace, $('#activity-reporting').checked);
   } catch (error) {
     taskMessage.textContent = error?.message ?? 'Could not start the Codex task.';
     finishTask();

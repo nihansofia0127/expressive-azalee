@@ -7,7 +7,8 @@ const eventTypes = new Set([
 
 const safeCategories = new Set(['image_generation', 'document_generation', 'email_draft', 'email_send', 'file_delete']);
 const safeActivityLabels = new Set(['IDLE', 'WORKING', 'CODING', 'PAINTING', 'WRITING', 'EMAILING', 'DELETING', 'WAITING', 'REVIEW', 'FAILED']);
-const safeEvidenceSources = new Set(['app_server_plan']);
+const safeEvidenceSources = new Set(['app_server_plan', 'agent_report']);
+const safeEvidenceStrengths = new Set(['reported']);
 const safeExtensions = new Set(['js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'rs', 'go', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'rb', 'php', 'html', 'css', 'scss', 'json', 'yaml', 'yml', 'toml', 'md', 'txt', 'rtf', 'doc', 'docx', 'odt']);
 const safeCommandKinds = new Set(['rm', 'unlink', 'rmdir', 'git', 'apply_patch', 'read', 'listFiles', 'search', 'unknown']);
 
@@ -25,17 +26,23 @@ function sanitizeActivity(value) {
     : [];
   const category = safeActivityLabels.has(value.category) ? value.category : null;
   const evidenceSource = safeEvidenceSources.has(value.evidenceSource) ? value.evidenceSource : null;
+  const evidenceStrength = safeEvidenceStrengths.has(value.evidenceStrength) ? value.evidenceStrength : null;
   const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence)
     ? Math.max(0, Math.min(1, value.confidence))
     : null;
   const stage = value.stage === 'intended' || value.stage === 'executing' || value.stage === 'completed' || value.stage === 'failed'
     ? value.stage
     : null;
+  const acceptedCategory = category && evidenceSource
+    && (evidenceSource !== 'agent_report' || ['CODING', 'WRITING', 'DELETING'].includes(category))
+    ? category
+    : null;
   return Object.freeze({
     operationCategory, artifactExtensions, changeKinds, commandKinds,
-    ...(category ? { category } : {}),
+    ...(acceptedCategory ? { category: acceptedCategory } : {}),
     ...(evidenceSource ? { evidenceSource } : {}),
-    ...(confidence !== null ? { confidence } : {}),
+    ...(evidenceStrength ? { evidenceStrength } : {}),
+    ...(confidence !== null && evidenceSource !== 'agent_report' ? { confidence } : {}),
     ...(stage ? { stage } : {}),
     ...(value.predicted === true ? { predicted: true } : {}),
   });

@@ -1,7 +1,8 @@
 use crate::normalized_event::{new_event, NormalizedEvent};
+use crate::activity_reporter;
 use crate::RunnerState;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -22,6 +23,7 @@ struct StreamContext {
     session_id: Option<String>,
     turn_id: Option<String>,
     sequence: Arc<AtomicU64>,
+    activity_report_items: HashSet<String>,
 }
 
 pub fn default_workspace() -> Result<String, String> {
@@ -37,6 +39,7 @@ pub fn start_task(
     state: &RunnerState,
     prompt: String,
     workspace: String,
+    activity_reporting: bool,
 ) -> Result<(), String> {
     if prompt.trim().is_empty() {
         return Err("Enter a task prompt first".to_string());
@@ -74,7 +77,7 @@ pub fn start_task(
             None,
             json!({"adapter": "codex-app-server"}),
         );
-        let result = run_task(&app, &active, &pending, &sequence, prompt, path);
+        let result = run_task(&app, &active, &pending, &sequence, prompt, path, activity_reporting);
         *active.lock().unwrap_or_else(|e| e.into_inner()) = None;
         pending.lock().unwrap_or_else(|e| e.into_inner()).clear();
         running.store(false, Ordering::Release);
@@ -123,10 +126,26 @@ fn run_task(
     sequence: &Arc<AtomicU64>,
     prompt: String,
     workspace: PathBuf,
+    activity_reporting: bool,
 ) -> Result<(), String> {
     let codex = resolve_codex_binary()?;
-    let mut child = Command::new(codex)
-        .args(["app-server", "--listen", "stdio://"])
+    let mut command = Command::new(codex);
+    command.args(["app-server", "--listen", "stdio://"]);
+    if activity_reporting {
+        let reporter = std::env::current_exe().map_err(|_| "Could not locate the Azalee activity reporter".to_string())?;
+        let reporter = reporter.to_string_lossy().to_string();
+        let toml_command = serde_json::to_string(&reporter).map_err(|_| "Could not configure the activity reporter".to_string())?;
+        command.args([
+            "-c".to_string(), format!("mcp_servers.azalee_activity.command={toml_command}"),
+            "-c".to_string(), "mcp_servers.azalee_activity.args=[\"--azalee-activity-mcp\"]".to_string(),
+            "-c".to_string(), "mcp_servers.azalee_activity.enabled=true".to_string(),
+            "-c".to_string(), "mcp_servers.azalee_activity.enabled_tools=[\"report_activity\"]".to_string(),
+            "-c".to_string(), "mcp_servers.azalee_activity.default_tools_approval_mode=\"auto\"".to_string(),
+            "-c".to_string(), "mcp_servers.azalee_activity.startup_timeout_sec=3".to_string(),
+            "-c".to_string(), "mcp_servers.azalee_activity.tool_timeout_sec=2".to_string(),
+        ]);
+    }
+    let mut child = command
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -137,7 +156,7 @@ fn run_task(
     let stdout = child.stdout.take().ok_or_else(|| "Codex App Server stdout was unavailable".to_string())?;
     let writer = Arc::new(Mutex::new(stdin));
     let mut lines = BufReader::new(stdout).lines();
-    let mut context = StreamContext { session_id: None, turn_id: None, sequence: sequence.clone() };
+    let mut context = StreamContext { session_id: None, turn_id: None, sequence: sequence.clone(), activity_report_items: HashSet::new() };
 
     send_request(&writer, 1, "initialize", json!({
         "clientInfo": {"name": "expressive_azalee", "title": "Expressive Azalee", "version": "0.1.0"}
@@ -172,9 +191,12 @@ fn run_task(
         "excludeTmpdirEnvVar": true,
         "excludeSlashTmp": true
     });
+    let turn_prompt = if activity_reporting {
+        format!("Azalee activity reporting is enabled for this task. Immediately before beginning a code-file creation or modification, call the report_activity MCP tool with activity CODING and stage intended. Immediately before beginning prose/document creation or modification, use WRITING. Immediately before beginning a file deletion, use DELETING. Do not report generic or ambiguous work; no report leaves Azalee at Working. Report only an operation you are about to perform; this reports intent and does not confirm that it happened. Then perform the task normally.\n\nTask:\n{prompt}")
+    } else { prompt };
     send_request(&writer, 3, "turn/start", json!({
         "threadId": thread_id,
-        "input": [{"type": "text", "text": prompt}],
+        "input": [{"type": "text", "text": turn_prompt}],
         "cwd": workspace.to_string_lossy(),
         "approvalPolicy": "on-request",
         "sandboxPolicy": sandbox_policy
@@ -323,9 +345,48 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let item = params.get("item").cloned().unwrap_or_else(|| json!({}));
     let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+    let item_id = item.get("id").and_then(Value::as_str);
     let status = item.get("status").and_then(Value::as_str).or_else(|| params.get("status").and_then(Value::as_str));
     let server_turn = params.pointer("/turn/id").and_then(Value::as_str).or_else(|| params.get("turnId").and_then(Value::as_str));
-    if let Some(turn_id) = server_turn { context.turn_id = Some(turn_id.to_string()); }
+    if method == "turn/started" {
+        context.activity_report_items.clear();
+        if let Some(turn_id) = server_turn { context.turn_id = Some(turn_id.to_string()); }
+    }
+    let is_activity_report = item_type == "mcpToolCall"
+        && item.get("server").and_then(Value::as_str) == Some("azalee_activity")
+        && item.get("tool").and_then(Value::as_str) == Some("report_activity");
+    if is_activity_report && method == "item/completed" {
+        return false;
+    }
+    if is_activity_report && method == "item/started" {
+        let Some(current_turn) = context.turn_id.as_deref() else { return false };
+        if server_turn.is_some_and(|reported_turn| reported_turn != current_turn) { return false; }
+        if !accept_report_item(&mut context.activity_report_items, item_id) { return false; }
+        let Some((category, stage)) = activity_reporter::validated_report(item.get("arguments").unwrap_or(&Value::Null)) else {
+            return false;
+        };
+        emit_event(
+            app,
+            &context.sequence,
+            context.session_id.clone(),
+            Some(current_turn.to_string()),
+            "activity.intent",
+            Some(stage),
+            Some("report_activity".to_string()),
+            item_id.map(str::to_string),
+            json!({"sourceMethod": method, "itemType": item_type, "activity": {
+                "category": category,
+                "evidenceSource": "agent_report",
+                "evidenceStrength": "reported",
+                "stage": stage,
+                "predicted": true
+            }}),
+        );
+        return false;
+    }
+    if method != "turn/started" {
+        if let Some(turn_id) = server_turn { context.turn_id = Some(turn_id.to_string()); }
+    }
     let server_session = params.get("threadId").and_then(Value::as_str).or_else(|| params.pointer("/thread/id").and_then(Value::as_str));
     if let Some(session_id) = server_session { context.session_id = Some(session_id.to_string()); }
 
@@ -378,6 +439,12 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
     });
     emit_event(app, &context.sequence, context.session_id.clone(), context.turn_id.clone(), event_type, lifecycle, tool_name, request_id, metadata);
     method == "turn/completed"
+}
+
+fn accept_report_item(seen: &mut HashSet<String>, item_id: Option<&str>) -> bool {
+    let Some(item_id) = item_id else { return false };
+    if seen.contains(item_id) || seen.len() >= 256 { return false; }
+    seen.insert(item_id.to_string())
 }
 
 /// Converts a structured App Server plan into a minimal prediction. Plan text is
@@ -539,7 +606,8 @@ fn _workspace_is_absolute(path: &Path) -> bool { path.is_absolute() }
 
 #[cfg(test)]
 mod activity_metadata_tests {
-    use super::{predicted_activity_from_plan, safe_activity_metadata};
+    use super::{accept_report_item, predicted_activity_from_plan, safe_activity_metadata};
+    use std::collections::HashSet;
     use serde_json::json;
 
     #[test]
@@ -573,5 +641,16 @@ mod activity_metadata_tests {
         assert_eq!(predicted_activity_from_plan(&json!({"plan": [
             {"status": "pending", "step": "Run pwd in the workspace"}
         ]})), None);
+    }
+
+    #[test]
+    fn activity_report_requires_an_item_id_and_deduplicates_within_the_turn() {
+        let mut seen = HashSet::new();
+        assert!(!accept_report_item(&mut seen, None));
+        assert!(accept_report_item(&mut seen, Some("item-1")));
+        assert!(!accept_report_item(&mut seen, Some("item-1")));
+        assert!(!accept_report_item(&mut seen, Some("item-1"))); // Completed items remain deduplicated until the next turn.
+        seen.clear(); // Turn start resets report identity scope.
+        assert!(accept_report_item(&mut seen, Some("item-1")));
     }
 }

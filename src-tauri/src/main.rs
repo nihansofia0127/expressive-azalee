@@ -1,4 +1,5 @@
 mod codex;
+mod activity_reporter;
 mod normalized_event;
 
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
@@ -33,8 +34,9 @@ fn start_task(
     state: tauri::State<'_, RunnerState>,
     prompt: String,
     workspace: String,
+    activity_reporting: bool,
 ) -> Result<(), String> {
-    codex::start_task(app, state.inner(), prompt, workspace)
+    codex::start_task(app, state.inner(), prompt, workspace, activity_reporting)
 }
 
 #[tauri::command]
@@ -52,6 +54,9 @@ fn respond_to_approval(
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--azalee-activity-mcp") {
+        std::process::exit(activity_reporter::run());
+    }
     tauri::Builder::default()
         .manage(RunnerState::default())
         .invoke_handler(tauri::generate_handler![

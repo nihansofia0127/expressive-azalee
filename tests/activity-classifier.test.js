@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Activity, classifyActivity } from '../src/activity-classifier.js';
+import { createActivityLifecycle } from '../src/activity-lifecycle.js';
 import { createEventCollector } from '../src/event-collector.js';
 import { PresentationMode, presentActivity } from '../src/presentation-mode.js';
 import { activityFixtures } from '../src/activity-fixtures.js';
@@ -89,7 +90,7 @@ test('Basic and Expressive consume the same intended classification without chan
   const basic = presentActivity(classification, PresentationMode.BASIC);
   const expressive = presentActivity(classification, PresentationMode.EXPRESSIVE);
   assert.equal(basic.label, 'Working');
-  assert.equal(expressive.label, 'Writing');
+  assert.equal(expressive.label, 'Intends Writing');
   assert.equal(classification.stage, 'intended');
   assert.equal(classification.predicted, true);
 });
@@ -121,4 +122,78 @@ test('collector accepts sanitized activity intent and never retains plan text', 
   assert.equal(event.sessionId, 'thread-2');
   assert.equal(event.turnId, 'turn-2');
   assert.equal(JSON.stringify(event).includes('private plan text'), false);
+});
+
+test('collector accepts only allowlisted agent-reported intent metadata', () => {
+  const collector = createEventCollector();
+  collector.accept({
+    eventId: 'reported-1', timestamp: 1, agentType: 'codex', sessionId: 'thread-r', turnId: 'turn-r',
+    eventType: 'activity.intent', lifecycleStatus: 'intended',
+    metadata: { activity: { category: 'CODING', evidenceSource: 'agent_report', evidenceStrength: 'reported', stage: 'intended', predicted: true, confidence: 0.99, prompt: 'private' } },
+  });
+  assert.deepEqual(collector.getLatest().metadata.activity, {
+    operationCategory: null, artifactExtensions: [], changeKinds: [], commandKinds: [],
+    category: 'CODING', evidenceSource: 'agent_report', evidenceStrength: 'reported', stage: 'intended', predicted: true,
+  });
+  assert.equal(JSON.stringify(collector.getLatest()).includes('private'), false);
+  collector.accept({
+    eventId: 'reported-2', timestamp: 2, agentType: 'codex', sessionId: 'thread-r', turnId: 'turn-r',
+    eventType: 'activity.intent', lifecycleStatus: 'intended',
+    metadata: { activity: { category: 'PAINTING', evidenceSource: 'agent_report', stage: 'intended', predicted: true } },
+  });
+  assert.equal(collector.getLatest().metadata.activity.category, undefined);
+});
+
+test('activity report remains explicitly intended through generic work and ends with its turn', () => {
+  const lifecycle = createActivityLifecycle();
+  const start = lifecycle.apply({ eventType: 'turn.started', turnId: 'turn-a', metadata: {} });
+  assert.equal(start.activity, Activity.WORKING);
+  const report = lifecycle.apply({
+    eventType: 'activity.intent', turnId: 'turn-a', lifecycleStatus: 'intended',
+    metadata: { activity: { category: 'WRITING', evidenceSource: 'agent_report', evidenceStrength: 'reported', predicted: true, stage: 'intended' } },
+  });
+  assert.equal(report.activity, Activity.WRITING);
+  assert.equal(report.predicted, true);
+  assert.equal(report.confirmed, false);
+  assert.equal(report.evidenceStrength, 'reported');
+  const generic = lifecycle.apply({ eventType: 'tool.started', turnId: 'turn-a', toolName: 'shell', metadata: { itemType: 'commandExecution' } });
+  assert.equal(generic.activity, Activity.WRITING);
+  assert.equal(generic.stage, 'intended');
+  assert.equal(lifecycle.apply({ eventType: 'turn.completed', turnId: 'turn-a', lifecycleStatus: 'completed', metadata: {} }).activity, Activity.IDLE);
+  assert.equal(lifecycle.apply({ eventType: 'activity.intent', turnId: 'turn-a', metadata: { activity: { category: 'CODING', evidenceSource: 'agent_report' } } }), null);
+});
+
+test('a missing report keeps generic work in WORKING in either presentation mode', () => {
+  const lifecycle = createActivityLifecycle();
+  lifecycle.apply({ eventType: 'turn.started', turnId: 'turn-missing', metadata: {} });
+  const classification = lifecycle.apply({ eventType: 'tool.started', turnId: 'turn-missing', toolName: 'shell', metadata: { itemType: 'commandExecution' } });
+  assert.equal(classification.activity, Activity.WORKING);
+  assert.equal(presentActivity(classification, PresentationMode.BASIC).label, 'Working');
+  assert.equal(presentActivity(classification, PresentationMode.EXPRESSIVE).label, 'Working');
+});
+
+test('reported activity reaches both modes from the same classification result', () => {
+  const classification = classifyActivity({
+    eventType: 'activity.intent', turnId: 'turn-mode', lifecycleStatus: 'intended',
+    metadata: { activity: { category: 'CODING', evidenceSource: 'agent_report', evidenceStrength: 'reported', stage: 'intended', predicted: true } },
+  });
+  assert.equal(presentActivity(classification, PresentationMode.BASIC).label, 'Working');
+  assert.equal(presentActivity(classification, PresentationMode.EXPRESSIVE).label, 'Intends Coding');
+  assert.equal(classification.activity, Activity.CODING);
+  assert.equal(classification.stage, 'intended');
+});
+
+test('waiting, turn failure, and confirmed evidence have priority over reported intent', () => {
+  const lifecycle = createActivityLifecycle();
+  lifecycle.apply({ eventType: 'turn.started', turnId: 'turn-b', metadata: {} });
+  lifecycle.apply({ eventType: 'activity.intent', turnId: 'turn-b', metadata: { activity: { category: 'CODING', evidenceSource: 'agent_report', predicted: true, stage: 'intended' } } });
+  assert.equal(lifecycle.apply({ eventType: 'approval.required', turnId: 'turn-b', lifecycleStatus: 'waiting', metadata: {} }).activity, Activity.WAITING);
+  assert.equal(lifecycle.apply({ eventType: 'tool.started', turnId: 'turn-b', toolName: 'shell', metadata: { itemType: 'commandExecution' } }).activity, Activity.WORKING);
+
+  lifecycle.apply({ eventType: 'turn.started', turnId: 'turn-c', metadata: {} });
+  lifecycle.apply({ eventType: 'activity.intent', turnId: 'turn-c', metadata: { activity: { category: 'WRITING', evidenceSource: 'agent_report', predicted: true, stage: 'intended' } } });
+  const confirmed = lifecycle.apply(activityFixtures.codeEditing.event);
+  assert.equal(confirmed.activity, Activity.CODING);
+  assert.equal(confirmed.confirmed, true);
+  assert.equal(lifecycle.apply({ eventType: 'turn.failed', turnId: 'turn-c', lifecycleStatus: 'failed', metadata: {} }).activity, Activity.FAILED);
 });

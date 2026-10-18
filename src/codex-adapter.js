@@ -9,9 +9,9 @@ export function createCodexAdapter({ onEvent }) {
       if (!unlisten) unlisten = await tauri.event.listen('azalee-normalized-event', event => onEvent(event.payload));
       return true;
     },
-    async startTask(prompt, workspace) {
+    async startTask(prompt, workspace, activityReporting = false) {
       if (!this.available) throw new Error('Start the desktop app with npm start to connect Codex.');
-      return tauri.core.invoke('start_task', { prompt, workspace });
+      return tauri.core.invoke('start_task', { prompt, workspace, activityReporting });
     },
     async interrupt() {
       if (!this.available) throw new Error('Codex task control is only available in the desktop app.');

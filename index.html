@@ -25,6 +25,7 @@
         <p id="workspace-help" class="help-text">Codex can write only inside this folder. The starting folder is a safe temporary workspace.</p>
         <label for="task-prompt">Task</label>
         <textarea id="task-prompt" rows="3" maxlength="20000" placeholder="What should Codex do in this workspace?"></textarea>
+        <label class="activity-report-option"><input id="activity-reporting" type="checkbox"/> Ask Codex to report activity intent (experimental; adds a tool step)</label>
         <div class="task-actions"><button id="start-task" class="primary-button" type="button">Start Codex task</button><button id="stop-task" type="button" disabled>Stop</button></div>
         <p id="task-message" class="task-message" role="status" aria-live="polite"></p>
       </section>

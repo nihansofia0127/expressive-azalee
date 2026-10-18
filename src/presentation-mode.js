@@ -19,7 +19,8 @@ export function presentActivity(classification, mode = PresentationMode.BASIC) {
   if (activity === Activity.FAILED) return Object.freeze({ behavior: Behavior.FAILED, animation: 'failed', label: 'Failed' });
   if (activity === Activity.REVIEW) return Object.freeze({ behavior: Behavior.REVIEW, animation: 'review', label: 'Review' });
   if (mode === PresentationMode.EXPRESSIVE && semanticPlaceholder[activity]) {
-    return Object.freeze({ behavior: Behavior.WORKING, animation: semanticPlaceholder[activity], label: activity[0] + activity.slice(1).toLowerCase() });
+    const label = activity[0] + activity.slice(1).toLowerCase();
+    return Object.freeze({ behavior: Behavior.WORKING, animation: semanticPlaceholder[activity], label: classification?.predicted ? `Intends ${label}` : label });
   }
   return Object.freeze({ behavior: Behavior.WORKING, animation: 'running', label: 'Working' });
 }

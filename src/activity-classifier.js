@@ -30,11 +30,13 @@ function evidence(event, items) {
               ? 'completed'
               : 'unknown';
   const activity = event.metadata?.activity ?? {};
+  const evidenceStrength = activity.evidenceStrength ?? (predicted ? 'inferred' : 'observed');
   return Object.freeze({
     explanation: items.join(' '),
     evidence: Object.freeze(items),
     evidenceSource: activity.evidenceSource ?? (event.metadata?.itemType === 'fileChange' ? 'app_server_file_change' : event.eventType.startsWith('tool.') || event.eventType.startsWith('item.') ? 'app_server_operation' : 'app_server_lifecycle'),
-    confidence: typeof activity.confidence === 'number' ? Math.max(0, Math.min(1, activity.confidence)) : predicted ? 0.35 : ['tool.started', 'tool.completed', 'item.started', 'item.completed'].includes(event.eventType) ? 0.9 : 1,
+    confidence: typeof activity.confidence === 'number' ? Math.max(0, Math.min(1, activity.confidence)) : activity.evidenceSource === 'agent_report' ? null : predicted ? 0.35 : ['tool.started', 'tool.completed', 'item.started', 'item.completed'].includes(event.eventType) ? 0.9 : 1,
+    evidenceStrength,
     stage,
     predicted,
     confirmed: !predicted && ['tool.started', 'tool.completed', 'item.started', 'item.completed', 'turn.started', 'turn.completed', 'turn.failed', 'connection.failed', 'approval.required', 'user_input.required'].includes(event.eventType),
@@ -74,7 +76,9 @@ export function classifyActivity(event) {
     return result(category, event, [
       category === Activity.WORKING
         ? 'The plan update did not contain a supported semantic activity; using WORKING.'
-        : `The App Server plan suggests ${category}; this is an intended-only prediction, not evidence that the operation started.`,
+        : activity.evidenceSource === 'agent_report'
+          ? `Codex reported ${category} as its immediate intention; this is not evidence that the operation started.`
+          : `The App Server plan suggests ${category}; this is an intended-only prediction, not evidence that the operation started.`,
     ]);
   }
   if (eventType === 'turn.failed' || eventType === 'connection.failed' || eventType === 'turn.completed' && status === 'failed') {
