@@ -81,6 +81,9 @@ export function classifyActivity(event) {
           : `The App Server plan suggests ${category}; this is an intended-only prediction, not evidence that the operation started.`,
     ]);
   }
+  if (eventType === 'activity.reporter.unavailable') {
+    return result(Activity.WORKING, event, ['The optional activity reporter tool failed; this does not imply the Codex turn failed.']);
+  }
   if (eventType === 'turn.failed' || eventType === 'connection.failed' || eventType === 'turn.completed' && status === 'failed') {
     return result(Activity.FAILED, event, ['The Codex turn or connection ended in failure.']);
   }

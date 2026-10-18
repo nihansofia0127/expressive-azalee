@@ -25,6 +25,22 @@ export function createCodexAdapter({ onEvent }) {
       if (!this.available) return '';
       return tauri.core.invoke('default_workspace');
     },
+    async codexVersion() {
+      if (!this.available) return null;
+      return tauri.core.invoke('codex_version');
+    },
+    async startStudySession(metadata) {
+      if (!this.available) throw new Error('Study recording requires the desktop app.');
+      return tauri.core.invoke('start_study_session', metadata);
+    },
+    async appendStudyRecord(studySessionId, record) {
+      if (!this.available) throw new Error('Study recording requires the desktop app.');
+      return tauri.core.invoke('append_study_record', { studySessionId, record });
+    },
+    async endStudySession(studySessionId, elapsedMs, turnCount) {
+      if (!this.available) throw new Error('Study recording requires the desktop app.');
+      return tauri.core.invoke('end_study_session', { studySessionId, elapsedMs, turnCount });
+    },
     async close() {
       if (unlisten) unlisten();
       unlisten = null;

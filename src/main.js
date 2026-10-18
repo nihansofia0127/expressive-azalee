@@ -7,6 +7,7 @@ import { createCodexAdapter } from './codex-adapter.js';
 import { createActivityLifecycle } from './activity-lifecycle.js';
 import { PresentationMode, presentActivity } from './presentation-mode.js';
 import { activityFixtures } from './activity-fixtures.js';
+import { createStudyRecorder } from './study-recorder.js';
 
 const $ = (selector) => document.querySelector(selector);
 const renderer = createAzaleeRenderer($('#azalee-canvas'));
@@ -19,8 +20,10 @@ const connectionIndicator = $('#connection-indicator');
 const approvalPanel = $('#approval-panel');
 const collector = createEventCollector();
 const activityLifecycle = createActivityLifecycle();
+const studyRecorder = createStudyRecorder({ append: (record) => codex.appendStudyRecord(record.studySessionId, record) });
 let currentApproval = null;
 let currentMode = PresentationMode.BASIC;
+let studyOutputPath = null;
 let latestClassification = { activity: 'IDLE', explanation: 'Waiting for an event.', evidence: [] };
 let latestEvent = null;
 
@@ -33,11 +36,13 @@ const stateMapper = createStateMapper((behavior) => animation.setBehavior(behavi
 const codex = createCodexAdapter({ onEvent: (event) => collector.accept(event) });
 
 collector.subscribe((event) => {
+  studyRecorder.observe(event);
   if (!stateMapper.apply(event)) return;
   latestEvent = event;
   latestClassification = activityLifecycle.apply(event);
+  studyRecorder.lifecycleTransitions(activityLifecycle.takeTransitions());
   if (!latestClassification) return;
-  renderPresentation();
+  if (!latestClassification.duplicateReport) renderPresentation();
   $('#last-event').textContent = JSON.stringify({ ...event, timestamp: new Date(Number(event.timestamp)).toISOString() }, null, 2);
   if (event.eventType === 'connection.state') {
     const connected = event.lifecycleStatus === 'connected';
@@ -46,7 +51,7 @@ collector.subscribe((event) => {
     connectionIndicator.setAttribute('aria-label', adapterStatus.textContent);
   }
   if (event.eventType === 'connection.failed' || event.eventType === 'turn.failed') {
-    taskMessage.textContent = 'Codex could not complete this task. See the latest event in Developer controls.';
+    taskMessage.textContent = studyRecorder.active ? 'Codex could not complete this task.' : 'Codex could not complete this task. See the latest event in Developer controls.';
     finishTask();
   }
   if (event.eventType === 'approval.required') {
@@ -63,7 +68,7 @@ collector.subscribe((event) => {
   }
   if (event.eventType === 'turn.completed') {
     taskMessage.textContent = event.lifecycleStatus === 'completed'
-      ? 'Codex finished. Azalee is resting.'
+      ? (activeStudy?.condition === 'NO_AVATAR' ? 'Codex finished.' : 'Codex finished. Azalee is resting.')
       : event.lifecycleStatus === 'interrupted'
         ? 'Task stopped.'
         : 'Codex task failed.';
@@ -72,12 +77,14 @@ collector.subscribe((event) => {
 });
 
 function renderPresentation() {
-  const selected = presentActivity(latestClassification, currentMode);
+  const mode = activeStudy?.condition === 'EXPRESSIVE' ? PresentationMode.EXPRESSIVE : activeStudy ? PresentationMode.BASIC : currentMode;
+  const selected = presentActivity(latestClassification, mode);
+  const visible = !(activeStudy?.condition === 'NO_AVATAR');
   animation.setBehavior(selected.behavior);
   animation.playAnimation(selected.animation);
   label.textContent = selected.label;
   $('#dev-behavior').textContent = selected.label;
-  $('#debug-mode').textContent = currentMode;
+  $('#debug-mode').textContent = mode;
   $('#debug-animation').textContent = animation.getAnimation();
   $('#debug-classification').textContent = latestClassification.activity;
   const confidence = typeof latestClassification.confidence === 'number' ? ` ${(latestClassification.confidence * 100).toFixed(0)}% confidence` : '';
@@ -88,6 +95,9 @@ function renderPresentation() {
     ? latestEvent.metadata.synthetic ? 'Synthetic fixture — not verified against real Codex execution.' : `Observed event from ${latestEvent.agentType}.`
     : 'No event received.';
   $('#azalee-canvas').setAttribute('aria-label', `Azalee ${selected.label.toLowerCase()}`);
+  const semantic = ['CODING', 'PAINTING', 'WRITING', 'EMAILING', 'DELETING'].includes(latestClassification.activity);
+  const displayActivity = mode === PresentationMode.EXPRESSIVE && semantic ? latestClassification.activity : selected.behavior;
+  studyRecorder.display({ classification: latestClassification, mode, label: selected.label, animation: selected.animation, visible, displayActivity });
 }
 
 function finishTask() {
@@ -95,7 +105,8 @@ function finishTask() {
   stopButton.disabled = true;
   approvalPanel.hidden = true;
   currentApproval = null;
-  $('#activity-reporting').disabled = false;
+  $('#activity-reporting').disabled = studyRecorder.active;
+  $('#study-end-header').disabled = false;
 }
 
 function setManualBehavior(behavior) {
@@ -116,7 +127,9 @@ $('#animation-select').addEventListener('change', (event) => {
 });
 for (const button of document.querySelectorAll('[data-mode]')) {
   button.addEventListener('click', () => {
+    if (studyRecorder.active) return;
     currentMode = button.dataset.mode;
+    studyRecorder.modeChanged(currentMode);
     for (const choice of document.querySelectorAll('[data-mode]')) choice.setAttribute('aria-pressed', String(choice === button));
     renderPresentation();
   });
@@ -202,6 +215,8 @@ startButton.addEventListener('click', async () => {
     startButton.disabled = true;
     stopButton.disabled = false;
     $('#activity-reporting').disabled = true;
+    $('#study-end-header').disabled = studyRecorder.active;
+    studyRecorder.userAction('user.task.started', 'WORKING', 'task_submit');
     taskMessage.textContent = 'Starting Codex App Server…';
     await codex.startTask(prompt, workspace, $('#activity-reporting').checked);
   } catch (error) {
@@ -212,6 +227,7 @@ startButton.addEventListener('click', async () => {
 
 stopButton.addEventListener('click', async () => {
   try {
+    studyRecorder.userAction('user.interruption.initiated', 'WORKING', 'stop_button');
     await codex.interrupt();
     taskMessage.textContent = 'Stopping Codex…';
   } catch (error) {
@@ -224,6 +240,7 @@ $('#decline-action').addEventListener('click', () => respondToApproval('decline'
 async function respondToApproval(decision) {
   if (!currentApproval) return;
   try {
+    studyRecorder.userAction('user.approval.responded', 'WAITING', decision);
     await codex.respondToApproval(currentApproval, decision);
     currentApproval = null;
     approvalPanel.hidden = true;
@@ -232,6 +249,68 @@ async function respondToApproval(decision) {
     taskMessage.textContent = error?.message ?? 'Could not respond to the approval request.';
   }
 }
+
+let activeStudy = null;
+$('#study-start').addEventListener('click', async () => {
+  if (startButton.disabled) {
+    $('#study-message').textContent = 'Finish or stop the current Codex task before starting a study session.';
+    return;
+  }
+  const taskId = $('#study-task-id').value.trim();
+  if (!taskId || !/^[A-Za-z0-9._:-]{1,80}$/.test(taskId)) {
+    $('#study-message').textContent = 'Enter a study task ID using letters, numbers, dot, underscore, colon, or hyphen.';
+    return;
+  }
+  try {
+    const id = crypto.randomUUID();
+    const condition = $('#study-condition').value;
+    const reportingEnabled = $('#activity-reporting').checked;
+    const agentVersion = await codex.codexVersion();
+    const outputPath = await codex.startStudySession({ studySessionId: id, condition, activityReportingEnabled: reportingEnabled, studyTaskId: taskId, applicationVersion: '0.1.0', agentVersion });
+    activeStudy = studyRecorder.start({ id, condition, reportingEnabled, taskId, agentVersion });
+    studyOutputPath = outputPath;
+    currentMode = condition === 'EXPRESSIVE' ? PresentationMode.EXPRESSIVE : PresentationMode.BASIC;
+    for (const button of document.querySelectorAll('[data-mode]')) button.setAttribute('aria-pressed', String(button.dataset.mode === currentMode));
+    document.body.classList.add('study-session');
+    document.body.classList.toggle('study-no-avatar', condition === 'NO_AVATAR');
+    $('#study-condition').disabled = true;
+    $('#study-task-id').disabled = true;
+    $('#activity-reporting').disabled = true;
+    $('#study-start').disabled = true;
+    $('#study-end-header').hidden = false;
+    $('#study-message').textContent = 'Recording active. End the session to flush logs and write its summary.';
+    $('#study-end-header').title = `Local study log: ${outputPath}`;
+    renderPresentation();
+  } catch (error) {
+    $('#study-message').textContent = error?.message ?? 'Could not start study recording.';
+  }
+});
+
+async function endStudySession() {
+  if (!activeStudy) return;
+  const ended = studyRecorder.end();
+  await studyRecorder.flush();
+  const writeWarning = studyRecorder.writeFailed;
+  try {
+    const summaryPath = await codex.endStudySession(ended.id, Math.round(ended.elapsedMs), studyRecorder.turnCount);
+    $('#study-message').textContent = `${writeWarning ? 'Partial recording: one or more event writes failed. ' : 'Recording saved. '}JSONL: ${studyOutputPath}; summary: ${summaryPath}`;
+  } catch (error) {
+    $('#study-message').textContent = `Recording ended, but summary creation failed: ${error?.message ?? 'unknown error'}`;
+  }
+  document.body.classList.remove('study-session', 'study-no-avatar');
+  $('#study-condition').disabled = false;
+  $('#study-task-id').disabled = false;
+  $('#activity-reporting').disabled = false;
+  $('#study-start').disabled = false;
+  $('#study-end-header').hidden = true;
+  $('#study-end-header').disabled = false;
+  activeStudy = null;
+  studyOutputPath = null;
+  currentMode = PresentationMode.BASIC;
+  for (const button of document.querySelectorAll('[data-mode]')) button.setAttribute('aria-pressed', String(button.dataset.mode === currentMode));
+  renderPresentation();
+}
+$('#study-end-header').addEventListener('click', endStudySession);
 
 $('#close-app').addEventListener('click', () => window.__TAURI__?.window?.getCurrentWindow?.().close());
 for (const element of [$('#drag-bar'), $('#pet-stage')]) {

@@ -34,6 +34,13 @@ pub fn default_workspace() -> Result<String, String> {
         .map_err(|_| "Could not resolve the temporary workspace".to_string())
 }
 
+pub fn codex_version() -> Option<String> {
+    let output = Command::new(resolve_codex_binary().ok()?).arg("--version").output().ok()?;
+    if !output.status.success() { return None; }
+    let version = String::from_utf8(output.stdout).ok()?.trim().chars().take(80).collect::<String>();
+    if version.is_empty() || !version.chars().all(|c| c.is_ascii_alphanumeric() || "._+- ".contains(c)) { None } else { Some(version) }
+}
+
 pub fn start_task(
     app: AppHandle,
     state: &RunnerState,
@@ -191,17 +198,30 @@ fn run_task(
         "excludeTmpdirEnvVar": true,
         "excludeSlashTmp": true
     });
-    let turn_prompt = if activity_reporting {
+    let mut reporter_available = activity_reporting;
+    let mut turn_request_id = 3;
+    if activity_reporting {
+        turn_request_id = 4;
+        let status_request = send_request(&writer, 3, "mcpServerStatus/list", json!({ "threadId": thread_id, "detail": "toolsAndAuthOnly", "serverName": "azalee_activity" }));
+        let status_result = if status_request.is_ok() {
+            wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, 3).ok()
+        } else { None };
+        reporter_available = status_result.map(|value| value.to_string().contains("report_activity")).unwrap_or(false);
+        if !reporter_available {
+            emit_event(app, &context.sequence, context.session_id.clone(), None, "activity.reporter.unavailable", Some("failed"), None, None, json!({ "sourceMethod": "mcpServerStatus/list", "itemType": "mcpToolCall", "reason": "reporter_not_advertised" }));
+        }
+    }
+    let turn_prompt = if reporter_available {
         format!("Azalee activity reporting is enabled for this task. Immediately before beginning a code-file creation or modification, call the report_activity MCP tool with activity CODING and stage intended. Immediately before beginning prose/document creation or modification, use WRITING. Immediately before beginning a file deletion, use DELETING. Do not report generic or ambiguous work; no report leaves Azalee at Working. Report only an operation you are about to perform; this reports intent and does not confirm that it happened. Then perform the task normally.\n\nTask:\n{prompt}")
     } else { prompt };
-    send_request(&writer, 3, "turn/start", json!({
+    send_request(&writer, turn_request_id, "turn/start", json!({
         "threadId": thread_id,
         "input": [{"type": "text", "text": turn_prompt}],
         "cwd": workspace.to_string_lossy(),
         "approvalPolicy": "on-request",
         "sandboxPolicy": sandbox_policy
     }))?;
-    let turn_started = wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, 3)?;
+    let turn_started = wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, turn_request_id)?;
     context.turn_id = turn_started.pointer("/turn/id").and_then(Value::as_str).map(str::to_string);
     if let Some(session) = active.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         session.turn_id = context.turn_id.clone();
@@ -356,6 +376,9 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
         && item.get("server").and_then(Value::as_str) == Some("azalee_activity")
         && item.get("tool").and_then(Value::as_str) == Some("report_activity");
     if is_activity_report && method == "item/completed" {
+        if status == Some("failed") {
+            emit_event(app, &context.sequence, context.session_id.clone(), context.turn_id.clone(), "activity.reporter.unavailable", Some("failed"), Some("report_activity".to_string()), item_id.map(str::to_string), json!({"sourceMethod": method, "itemType": item_type, "reason": "reporter_tool_failed"}));
+        }
         return false;
     }
     if is_activity_report && method == "item/started" {
@@ -408,7 +431,7 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
         "error" => ("turn.failed", Some("failed"), None),
         _ => ("agent.event", status, None),
     };
-    let request_id = message.get("id").map(Value::to_string);
+    let request_id = message.get("id").map(Value::to_string).or_else(|| item_id.map(str::to_string));
     let plan_category = if method == "turn/plan/updated" { predicted_activity_from_plan(&params) } else { None };
     if let Some(category) = plan_category {
         emit_event(

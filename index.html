@@ -12,7 +12,7 @@
     <main class="app-shell">
       <header class="drag-bar" id="drag-bar">
         <div class="brand"><span class="brand-mark" aria-hidden="true">✿</span><span>Azalee</span></div>
-        <div class="window-actions"><span id="connection-indicator" class="connection-indicator" aria-label="Codex disconnected"></span><button id="close-app" class="icon-button" type="button" aria-label="Close Azalee">×</button></div>
+        <div class="window-actions"><span id="connection-indicator" class="connection-indicator" aria-label="Codex disconnected"></span><button id="study-end-header" type="button" hidden>End study</button><button id="close-app" class="icon-button" type="button" aria-label="Close Azalee">×</button></div>
       </header>
       <section class="pet-stage" id="pet-stage" aria-label="Azalee, animated forest cat">
         <canvas id="azalee-canvas" width="384" height="416" role="img" aria-label="Azalee resting"></canvas>
@@ -33,6 +33,16 @@
         <p>Codex needs your approval to continue.</p>
         <div class="task-actions"><button id="approve-action" class="primary-button" type="button">Allow once</button><button id="decline-action" type="button">Decline</button></div>
       </section>
+      <details class="study-panel" id="study-panel">
+        <summary>Research session (optional)</summary>
+        <p class="help-text">Opt-in local JSONL recording. Logs activity labels and timings only; prompts, paths, commands, and file contents are excluded.</p>
+        <label for="study-condition">Experimental condition</label>
+        <select id="study-condition"><option value="NO_AVATAR">No Avatar</option><option value="BASIC">Basic Azalee</option><option value="EXPRESSIVE">Expressive Azalee</option></select>
+        <label for="study-task-id">Study task ID</label>
+        <input id="study-task-id" type="text" maxlength="80" pattern="[A-Za-z0-9._:-]*" placeholder="e.g. task-01"/>
+        <div class="task-actions"><button id="study-start" class="primary-button" type="button">Start study session</button></div>
+        <p id="study-message" class="task-message" role="status" aria-live="polite">Recording is off.</p>
+      </details>
       <details class="developer-panel" id="developer-panel">
         <summary>Developer controls</summary>
         <label for="animation-select">Play any atlas row</label>

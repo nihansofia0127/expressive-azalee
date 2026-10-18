@@ -3,6 +3,7 @@ const eventTypes = new Set([
   'turn.completed', 'turn.failed', 'tool.started', 'tool.completed',
   'approval.required', 'user_input.required', 'request.resolved', 'item.started', 'item.completed', 'agent.event',
   'activity.intent',
+  'activity.reporter.unavailable',
 ]);
 
 const safeCategories = new Set(['image_generation', 'document_generation', 'email_draft', 'email_send', 'file_delete']);

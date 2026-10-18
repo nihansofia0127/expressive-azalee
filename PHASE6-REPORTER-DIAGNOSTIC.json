@@ -1,0 +1,91 @@
+{
+  "monotonicElapsedMs": true,
+  "results": [
+    {
+      "activity": "coding",
+      "expected": "CODING",
+      "reporting": true,
+      "repetition": 1,
+      "templateId": "CODE_CREATE_JS_01",
+      "turnStatus": "completed",
+      "durationMs": 10683.3,
+      "turnIdObserved": true,
+      "firstWorkingMs": 117.9,
+      "reportMs": 4931.8,
+      "reportActivity": "CODING",
+      "reportMatchedExpected": true,
+      "reportCount": 2,
+      "reportedActivities": [
+        "CODING",
+        "CODING"
+      ],
+      "reportArgumentShapes": [
+        {
+          "fieldCount": 2,
+          "hasOnlyAllowedFields": true
+        },
+        {
+          "fieldCount": 2,
+          "hasOnlyAllowedFields": true
+        }
+      ],
+      "reporterTerminalFacts": [
+        {
+          "status": "failed",
+          "hasErrorObject": true,
+          "hasErrorMessage": true,
+          "hasErrorCode": false,
+          "errorCategory": "other",
+          "resultIsError": false,
+          "hasContent": false
+        },
+        {
+          "status": "failed",
+          "hasErrorObject": true,
+          "hasErrorMessage": true,
+          "hasErrorCode": false,
+          "errorCategory": "other",
+          "resultIsError": false,
+          "hasContent": false
+        }
+      ],
+      "correctReportCount": 2,
+      "incorrectReportCount": 0,
+      "duplicateReports": true,
+      "duplicateReportCount": 1,
+      "reportedClassification": "CODING",
+      "firstOperationType": "commandExecution",
+      "firstOperationStartMs": 2896.5,
+      "firstOperationCompletionMs": 2897.2,
+      "operationAfterReportType": "fileChange",
+      "reportToFirstOperationMs": 4547.5,
+      "reportToTurnCompletionMs": 5751.5,
+      "firstConfirmedSemantic": {
+        "activity": "CODING",
+        "startMs": 9479.6,
+        "itemType": "fileChange"
+      },
+      "firstMatchingSemanticAfterReport": {
+        "activity": "CODING",
+        "startMs": 9479.6,
+        "itemType": "fileChange"
+      },
+      "firstMatchingSemanticCompletionMs": 9511,
+      "unconfirmedIntent": false,
+      "artifactFirstObservedMs": 6783.8,
+      "reportToConfirmedSemanticStartMs": 4547.8,
+      "toolFailures": 2,
+      "toolFailureTypes": {
+        "mcp": 2
+      },
+      "malformedReportCalls": 0,
+      "reporterToolStatuses": {
+        "failed": 2
+      },
+      "reporterAvailable": true,
+      "reporterUnavailable": false,
+      "reportEmitted": true,
+      "artifactVerified": true
+    }
+  ]
+}

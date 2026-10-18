@@ -57,7 +57,16 @@ fn tool_definition() -> Value {
             },
             "required": ["activity", "stage"],
             "additionalProperties": false
-        }
+            },
+            "outputSchema": {
+                "type": "object",
+                "properties": {
+                    "activity": {"type": "string", "enum": ACTIVITIES},
+                    "stage": {"type": "string", "enum": ["intended"]}
+                },
+                "required": ["activity", "stage"],
+                "additionalProperties": false
+            }
     })
 }
 
@@ -81,17 +90,21 @@ fn call_tool(request: &Value) -> Value {
         return json!({"isError": true, "content": [{"type": "text", "text": "Unknown activity report tool."}]});
     }
     match validated_report(params.get("arguments").unwrap_or(&Value::Null)) {
-        Some((activity, stage)) => json!({
-            "content": [{"type": "text", "text": "Activity intent accepted."}],
-            "structuredContent": {"activity": activity, "stage": stage}
-        }),
+        Some((activity, stage)) => {
+            let structured = json!({"activity": activity, "stage": stage});
+            json!({
+                "content": [{"type": "text", "text": structured.to_string()}],
+                "structuredContent": structured,
+                "isError": false
+            })
+        },
         None => json!({"isError": true, "content": [{"type": "text", "text": "Invalid activity report."}]}),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validated_report;
+    use super::{call_tool, validated_report};
     use serde_json::json;
 
     #[test]
@@ -111,5 +124,13 @@ mod tests {
         ] {
             assert_eq!(validated_report(&value), None);
         }
+    }
+
+    #[test]
+    fn successful_tool_result_has_an_explicit_success_flag_and_matching_structured_content() {
+        let result = call_tool(&json!({"params":{"name":"report_activity","arguments":{"activity":"CODING","stage":"intended"}}}));
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"], json!({"activity":"CODING","stage":"intended"}));
+        assert_eq!(result["content"][0]["text"], "{\"activity\":\"CODING\",\"stage\":\"intended\"}");
     }
 }

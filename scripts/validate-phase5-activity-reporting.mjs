@@ -16,13 +16,20 @@ const codexPath = process.env.CODEX_BIN || [
 const reporterPath = path.resolve('src-tauri/target/release/expressive-azalee');
 const smokeOnly = process.argv.includes('--smoke');
 const supplementalOnly = process.argv.includes('--supplemental');
+const phase6 = process.argv.includes('--phase6');
+const reporterDiagnostic = process.argv.includes('--reporter-diagnostic');
+const argValue = (name, fallback) => Number(process.argv.find((arg) => arg.startsWith(`--${name}=`))?.split('=')[1] ?? fallback);
+const requestedTrials = argValue('trials', 10);
+const controlTrials = argValue('controls', 5);
+const randomSeed = argValue('seed', 20261018) >>> 0;
+const outputArgument = process.argv.find((arg) => arg.startsWith('--output='))?.slice('--output='.length);
 const reportInstruction = 'Azalee activity reporting is enabled for this task. Immediately before beginning a code-file creation or modification, call the report_activity MCP tool with activity CODING and stage intended. Immediately before beginning prose/document creation or modification, use WRITING. Immediately before beginning a file deletion, use DELETING. Do not report generic or ambiguous work; no report leaves Azalee at Working. Report only an operation you are about to perform; this reports intent and does not confirm that it happened. Then perform the task normally.\n\nTask:\n';
 const tasks = [
-  { key: 'coding', expected: Activity.CODING, prompt: 'Create a JavaScript file named result.js containing a small exported function that returns the number 7.' },
-  { key: 'writing', expected: Activity.WRITING, prompt: 'Create a Markdown file named result.md containing one short paragraph about a quiet garden.' },
-  { key: 'deleting', expected: Activity.DELETING, prompt: 'Delete the disposable file named disposable.txt from this workspace.' },
-  { key: 'shell', expected: Activity.WORKING, prompt: 'Run pwd in this workspace. Do not create, edit, or delete any files.' },
-  { key: 'recoverable_failure', expected: Activity.WORKING, prompt: 'Run a harmless shell command that returns a nonzero exit code, then recover by running pwd. Do not create, edit, or delete files.' },
+  { key: 'coding', templateId: 'CODE_CREATE_JS_01', expected: Activity.CODING, prompt: 'Create a JavaScript file named result.js containing a small exported function that returns the number 7.', artifact: { name: 'result.js', condition: 'present' } },
+  { key: 'writing', templateId: 'WRITE_CREATE_MD_01', expected: Activity.WRITING, prompt: 'Create a Markdown file named result.md containing one short paragraph about a quiet garden.', artifact: { name: 'result.md', condition: 'present' } },
+  { key: 'deleting', templateId: 'DELETE_TEMP_01', expected: Activity.DELETING, prompt: 'Delete the disposable file named disposable.txt from this workspace.', artifact: { name: 'disposable.txt', condition: 'absent' } },
+  { key: 'shell', templateId: 'CONTROL_PWD_01', expected: Activity.WORKING, prompt: 'Run pwd in this workspace. Do not create, edit, or delete any files.' },
+  { key: 'recoverable_failure', templateId: 'CONTROL_RECOVERABLE_FAILURE_01', expected: Activity.WORKING, prompt: 'Run the harmless shell command `false` as its own operation so it returns a nonzero exit code. Then recover by running `pwd` as a separate operation. Do not create, edit, or delete files.' },
 ];
 
 function elapsed(origin) { return Math.round((performance.now() - origin) * 10) / 10; }
@@ -92,7 +99,21 @@ async function runTask(task, reporting, repetition, root) {
   let turnStatus = 'unknown';
   let endTurn;
   const completed = new Promise((resolve) => { endTurn = resolve; });
-  const records = { firstWorkingMs: null, reportMs: null, reportActivity: null, reportClassification: null, reportCount: 0, firstOperation: null, firstOperationAfterReport: null, firstSemantic: null, toolFailures: 0, malformedReportCalls: 0 };
+  const records = { firstWorkingMs: null, reportMs: null, reportActivity: null, reportClassification: null, reportActivities: [], reportArgumentShapes: [], reporterTerminalFacts: [], reportCount: 0, firstOperation: null, firstOperationAfterReport: null, firstOperationCompletionMs: null, firstSemantic: null, firstSemanticAfterReport: null, firstSemanticCompletionMs: null, toolFailures: 0, malformedReportCalls: 0 };
+  const itemStarts = new Map();
+  const failureTypes = {};
+  const reporterStatuses = {};
+  let pendingReportedActivity = null;
+  let duplicateReportCount = 0;
+  let artifactFirstObservedMs = null;
+  let artifactTimer = null;
+  if (task.artifact) {
+    artifactTimer = setInterval(async () => {
+      if (artifactFirstObservedMs !== null) return;
+      const exists = await access(path.join(workspace, task.artifact.name)).then(() => true, () => false);
+      if ((task.artifact.condition === 'present' && exists) || (task.artifact.condition === 'absent' && !exists)) artifactFirstObservedMs = elapsed(origin);
+    }, 10);
+  }
   let reporterConfigured = false;
   let reporterObserved = false;
 
@@ -125,30 +146,59 @@ async function runTask(task, reporting, repetition, root) {
       turnStatus = params.turn?.status ?? params.status ?? 'unknown';
       endTurn();
     }
-    if (message.method === 'item/completed' && params.item?.status === 'failed') records.toolFailures += 1;
+    if (message.method === 'item/completed' && params.item?.status === 'failed') {
+      records.toolFailures += 1;
+      const type = ({ commandExecution: 'shell', mcpToolCall: 'mcp', fileChange: 'file_change', dynamicToolCall: 'dynamic_tool', collabToolCall: 'collab_tool' })[params.item.type] ?? 'other';
+      failureTypes[type] = (failureTypes[type] ?? 0) + 1;
+    }
+    if (message.method === 'item/completed' && params.item?.type === 'mcpToolCall' && params.item?.server === 'azalee_activity' && params.item?.tool === 'report_activity') {
+      const status = ['completed', 'failed', 'in_progress'].includes(params.item.status) ? params.item.status : 'unknown';
+      reporterStatuses[status] = (reporterStatuses[status] ?? 0) + 1;
+      const item = params.item;
+      const errorMessage = typeof item.error?.message === 'string' ? item.error.message.toLowerCase() : '';
+      const errorCategory = !errorMessage ? 'none' : /timed? ?out|timeout/.test(errorMessage) ? 'timeout' : /closed|disconnected|exited/.test(errorMessage) ? 'transport' : /protocol|parse|json/.test(errorMessage) ? 'protocol' : /invalid|schema|argument/.test(errorMessage) ? 'validation' : /denied|approval|permission/.test(errorMessage) ? 'permission' : 'other';
+      records.reporterTerminalFacts.push({ status, hasErrorObject: Boolean(item.error && typeof item.error === 'object'), hasErrorMessage: Boolean(errorMessage), hasErrorCode: Number.isInteger(item.error?.code), errorCategory, resultIsError: item.result?.isError === true, hasContent: Array.isArray(item.result?.content) && item.result.content.length > 0 });
+    }
+    if (message.method === 'item/completed' && typeof params.item?.id === 'string' && itemStarts.has(params.item.id)) {
+      const id = params.item.id;
+      if (id === records.firstOperation?.itemId || id === records.firstOperationAfterReport?.itemId) records.firstOperationCompletionMs ??= elapsed(origin);
+      if (id === records.firstSemantic?.itemId || id === records.firstSemanticAfterReport?.itemId) records.firstSemanticCompletionMs ??= elapsed(origin);
+      itemStarts.delete(params.item.id);
+    }
     if (message.method !== 'item/started' && message.method !== 'item/completed') return;
     const item = params.item ?? {};
+    if (message.method === 'item/started' && typeof item.id === 'string') itemStarts.set(item.id, elapsed(origin));
     if (item.type === 'mcpToolCall' && item.server === 'azalee_activity' && item.tool === 'report_activity' && message.method === 'item/started') {
+      const keys = item.arguments && typeof item.arguments === 'object' && !Array.isArray(item.arguments) ? Object.keys(item.arguments).sort() : [];
+      const hasOnlyAllowedFields = keys.length === 2 && keys[0] === 'activity' && keys[1] === 'stage';
+      records.reportArgumentShapes.push({ fieldCount: keys.length, hasOnlyAllowedFields });
       const classification = classifyItem(item, message.method);
-      if (!classification) { records.malformedReportCalls += 1; return; }
+      if (!classification || !hasOnlyAllowedFields) { records.malformedReportCalls += 1; return; }
       reporterObserved = true;
       records.reportMs ??= elapsed(origin);
       records.reportActivity ??= item.arguments.activity;
       records.reportClassification ??= classification.activity;
+      records.reportActivities.push(item.arguments.activity);
+      if (pendingReportedActivity === item.arguments.activity) duplicateReportCount += 1;
+      pendingReportedActivity = item.arguments.activity;
       records.reportCount += 1;
       return;
     }
     if (message.method !== 'item/started') return;
     if (!records.firstOperation && ['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall'].includes(item.type)) {
-      records.firstOperation = { type: item.type, startMs: elapsed(origin) };
+      records.firstOperation = { type: item.type, itemId: item.id ?? null, startMs: elapsed(origin) };
     }
     if (records.reportMs !== null && !records.firstOperationAfterReport && ['commandExecution', 'fileChange', 'mcpToolCall', 'dynamicToolCall'].includes(item.type)) {
-      records.firstOperationAfterReport = { type: item.type, startMs: elapsed(origin) };
+      records.firstOperationAfterReport = { type: item.type, itemId: item.id ?? null, startMs: elapsed(origin) };
     }
     const classification = classifyItem(item, message.method);
+    if (classification.confirmed && classification.activity === pendingReportedActivity && ![Activity.WORKING, Activity.IDLE].includes(classification.activity)) pendingReportedActivity = null;
     if (!records.firstSemantic && classification.confirmed && ![Activity.WORKING, Activity.IDLE].includes(classification.activity)) {
-      records.firstSemantic = { activity: classification.activity, startMs: elapsed(origin), itemType: item.type };
+        records.firstSemantic = { activity: classification.activity, itemId: item.id ?? null, startMs: elapsed(origin), itemType: item.type };
     }
+      if (!records.firstSemanticAfterReport && records.reportMs !== null && classification.confirmed && classification.activity === records.reportActivity) {
+        records.firstSemanticAfterReport = { activity: classification.activity, itemId: item.id ?? null, startMs: elapsed(origin), itemType: item.type };
+      }
   });
 
   const send = (method, params) => {
@@ -168,11 +218,10 @@ async function runTask(task, reporting, repetition, root) {
     if (reporting) {
       const mcp = await send('mcpServerStatus/list', { threadId, detail: 'toolsAndAuthOnly', serverName: 'azalee_activity' });
       const content = JSON.stringify(mcp);
-      if (!content.includes('report_activity')) throw new Error('Configured Azalee MCP tool was not listed for the App Server thread');
-      reporterConfigured = true;
+      reporterConfigured = content.includes('report_activity');
     }
     origin = performance.now();
-    const taskText = reporting ? `${reportInstruction}${task.prompt}` : task.prompt;
+    const taskText = reporting && reporterConfigured ? `${reportInstruction}${task.prompt}` : task.prompt;
     const sandboxPolicy = { type: 'workspaceWrite', writableRoots: [workspace], networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true };
     const turn = await send('turn/start', { threadId, input: [{ type: 'text', text: taskText }], cwd: workspace, approvalPolicy: 'on-request', sandboxPolicy });
     const turnId = turn.turn?.id;
@@ -190,26 +239,40 @@ async function runTask(task, reporting, repetition, root) {
     if (task.key === 'writing') artifactVerified = await access(path.join(workspace, 'result.md')).then(() => true, () => false);
     if (task.key === 'deleting') artifactVerified = await access(path.join(workspace, 'disposable.txt')).then(() => false, () => true);
     return {
-      activity: task.key, expected: task.expected, reporting, repetition, turnStatus, durationMs,
+      activity: task.key, expected: task.expected, reporting, repetition, templateId: task.templateId, turnStatus, durationMs,
       turnIdObserved: turnIdSeen, firstWorkingMs: records.firstWorkingMs,
       reportMs: records.reportMs, reportActivity: records.reportActivity,
       reportMatchedExpected: records.reportActivity === null ? null : records.reportActivity === task.expected,
       reportCount: records.reportCount,
-      duplicateReports: records.reportCount > 1,
+      reportedActivities: records.reportActivities,
+      reportArgumentShapes: records.reportArgumentShapes,
+      reporterTerminalFacts: records.reporterTerminalFacts,
+      correctReportCount: records.reportActivities.filter((category) => category === task.expected).length,
+      incorrectReportCount: records.reportActivities.filter((category) => category !== task.expected).length,
+      duplicateReports: duplicateReportCount > 0,
+      duplicateReportCount,
       reportedClassification: records.reportClassification,
       firstOperationType: records.firstOperation?.type ?? null,
       firstOperationStartMs: records.firstOperation?.startMs ?? null,
+      firstOperationCompletionMs: records.firstOperationCompletionMs,
       operationAfterReportType: records.firstOperationAfterReport?.type ?? null,
       reportToFirstOperationMs: records.reportMs !== null && records.firstOperationAfterReport ? Math.round((records.firstOperationAfterReport.startMs - records.reportMs) * 10) / 10 : null,
       reportToTurnCompletionMs: records.reportMs !== null ? Math.round((durationMs - records.reportMs) * 10) / 10 : null,
-      firstConfirmedSemantic: records.firstSemantic,
-      reportToConfirmedSemanticStartMs: records.reportMs !== null && records.firstSemantic ? Math.round((records.firstSemantic.startMs - records.reportMs) * 10) / 10 : null,
-      toolFailures: records.toolFailures, malformedReportCalls: records.malformedReportCalls,
+      firstConfirmedSemantic: records.firstSemantic ? { activity: records.firstSemantic.activity, startMs: records.firstSemantic.startMs, itemType: records.firstSemantic.itemType } : null,
+      firstMatchingSemanticAfterReport: records.firstSemanticAfterReport ? { activity: records.firstSemanticAfterReport.activity, startMs: records.firstSemanticAfterReport.startMs, itemType: records.firstSemanticAfterReport.itemType } : null,
+      firstMatchingSemanticCompletionMs: records.firstSemanticCompletionMs,
+      unconfirmedIntent: records.reportMs !== null && !records.firstSemanticAfterReport,
+      artifactFirstObservedMs,
+      reportToConfirmedSemanticStartMs: records.reportMs !== null && records.firstSemanticAfterReport ? Math.round((records.firstSemanticAfterReport.startMs - records.reportMs) * 10) / 10 : null,
+      toolFailures: records.toolFailures, toolFailureTypes: failureTypes, malformedReportCalls: records.malformedReportCalls,
+      reporterToolStatuses: reporterStatuses,
       reporterAvailable: reporting ? reporterConfigured : null,
+      reporterUnavailable: reporting && !reporterConfigured,
       reportEmitted: reporting ? reporterObserved : null,
       artifactVerified,
     };
   } finally {
+    if (artifactTimer) clearInterval(artifactTimer);
     lines.close();
     child.kill('SIGTERM');
     await new Promise((resolve) => child.once('exit', resolve));
@@ -218,10 +281,39 @@ async function runTask(task, reporting, repetition, root) {
 
 async function main() {
   if (!codexPath) throw new Error('Codex CLI was not found; set CODEX_BIN to its executable path.');
-  const root = await mkdtemp(path.join(os.tmpdir(), 'azalee-phase5-'));
+  const root = await mkdtemp(path.join(os.tmpdir(), phase6 ? 'azalee-phase6-' : 'azalee-phase5-'));
   const results = [];
   try {
-    if (smokeOnly) {
+    if (reporterDiagnostic) {
+      results.push(await runTask(tasks[0], true, 1, root));
+      await writeFile(outputArgument || 'PHASE6-REPORTER-DIAGNOSTIC.json', `${JSON.stringify({ monotonicElapsedMs: true, results }, null, 2)}\n`);
+      const result = results[0];
+      console.log(JSON.stringify({ activity: result.activity, reporting: result.reporting, turnStatus: result.turnStatus, reportCount: result.reportCount, reportArgumentShapes: result.reportArgumentShapes, malformedReportCalls: result.malformedReportCalls, reporterToolStatuses: result.reporterToolStatuses, toolFailureTypes: result.toolFailureTypes, artifactVerified: result.artifactVerified }));
+    } else if (phase6) {
+      if (!Number.isInteger(requestedTrials) || requestedTrials < 1 || requestedTrials > 100 || !Number.isInteger(controlTrials) || controlTrials < 1 || controlTrials > 50) throw new Error('Trial counts must be positive integers (activity <= 100, controls <= 50).');
+      let state = randomSeed || 1;
+      const random = () => { state = (state * 1664525 + 1013904223) >>> 0; return state / 0x100000000; };
+      const schedule = [];
+      for (const task of tasks.slice(0, 3)) {
+        for (let repetition = 1; repetition <= requestedTrials; repetition += 1) {
+          const pair = random() < 0.5 ? [true, false] : [false, true];
+          for (const reporting of pair) schedule.push({ task, reporting, repetition });
+        }
+      }
+      for (const task of tasks.slice(3)) {
+        for (let repetition = 1; repetition <= controlTrials; repetition += 1) {
+          const pair = random() < 0.5 ? [true, false] : [false, true];
+          for (const reporting of pair) schedule.push({ task, reporting, repetition });
+        }
+      }
+      for (let i = schedule.length - 1; i > 0; i -= 1) { const j = Math.floor(random() * (i + 1)); [schedule[i], schedule[j]] = [schedule[j], schedule[i]]; }
+      for (const [index, item] of schedule.entries()) {
+        const result = await runTask(item.task, item.reporting, item.repetition, root);
+        result.runOrder = index + 1;
+        results.push(result);
+        console.log(JSON.stringify({ runOrder: result.runOrder, templateId: result.templateId, reporting: result.reporting, turnStatus: result.turnStatus, durationMs: result.durationMs, reportMs: result.reportMs, reportMatchedExpected: result.reportMatchedExpected, duplicateReports: result.duplicateReports, unconfirmedIntent: result.unconfirmedIntent, firstMatchingSemanticAfterReport: result.firstMatchingSemanticAfterReport, artifactFirstObservedMs: result.artifactFirstObservedMs, toolFailures: result.toolFailures, artifactVerified: result.artifactVerified }));
+      }
+    } else if (smokeOnly) {
       results.push(await runTask(tasks[0], true, 1, root));
     } else if (supplementalOnly) {
       for (let repetition = 1; repetition <= 2; repetition += 1) results.push(await runTask(tasks[3], true, repetition, root));
@@ -246,8 +338,12 @@ async function main() {
         allResults = [...priorResults, ...results];
       } catch { /* A supplemental run can also be used on its own. */ }
     }
-    await writeFile('PHASE5-LIVE-RESULTS.json', `${JSON.stringify({ monotonicElapsedMs: true, results: allResults }, null, 2)}\n`);
-    for (const result of results) {
+    if (phase6) {
+      await writeFile(outputArgument || 'PHASE6-LIVE-RESULTS.json', `${JSON.stringify({ monotonicElapsedMs: true, randomSeed, requestedActivityTrialsPerArm: requestedTrials, requestedControlTrialsPerArm: controlTrials, randomizedRunOrder: true, sanitizedTaskTemplates: tasks.map(({ key, templateId, expected }) => ({ key, templateId, expected })), results }, null, 2)}\n`);
+    } else if (!reporterDiagnostic) {
+      await writeFile('PHASE5-LIVE-RESULTS.json', `${JSON.stringify({ monotonicElapsedMs: true, results: allResults }, null, 2)}\n`);
+    }
+    if (!phase6 && !reporterDiagnostic) for (const result of results) {
       console.log(JSON.stringify({ activity: result.activity, reporting: result.reporting, repetition: result.repetition, turnStatus: result.turnStatus, durationMs: result.durationMs, firstWorkingMs: result.firstWorkingMs, reportMs: result.reportMs, reportActivity: result.reportActivity, reportMatchedExpected: result.reportMatchedExpected, reportCount: result.reportCount, reportToConfirmedSemanticStartMs: result.reportToConfirmedSemanticStartMs, firstConfirmedSemantic: result.firstConfirmedSemantic, toolFailures: result.toolFailures, reporterAvailable: result.reporterAvailable, artifactVerified: result.artifactVerified }));
     }
   } finally {
