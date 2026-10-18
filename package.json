@@ -1,0 +1,17 @@
+{
+  "name": "expressive-azalee",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tauri dev",
+    "dev:server": "node scripts/dev-server.mjs",
+    "build": "node scripts/build-frontend.mjs",
+    "tauri": "tauri",
+    "tauri:build": "tauri build",
+    "test": "node --test",
+    "check": "node --check src/main.js && node --check src/agent-state.js && node --check src/event-collector.js && node --check src/state-mapper.js && node --check src/activity-classifier.js && node --check src/presentation-mode.js && node --check src/animation-controller.js && node --check src/azalee-renderer.js && node --check src/codex-adapter.js"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.3"
+  }
+}
