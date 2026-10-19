@@ -57,16 +57,16 @@ fn tool_definition() -> Value {
             },
             "required": ["activity", "stage"],
             "additionalProperties": false
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "activity": {"type": "string", "enum": ACTIVITIES},
+                "stage": {"type": "string", "enum": ["intended"]}
             },
-            "outputSchema": {
-                "type": "object",
-                "properties": {
-                    "activity": {"type": "string", "enum": ACTIVITIES},
-                    "stage": {"type": "string", "enum": ["intended"]}
-                },
-                "required": ["activity", "stage"],
-                "additionalProperties": false
-            }
+            "required": ["activity", "stage"],
+            "additionalProperties": false
+        }
     })
 }
 

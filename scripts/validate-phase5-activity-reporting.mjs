@@ -99,7 +99,7 @@ async function runTask(task, reporting, repetition, root) {
   let turnStatus = 'unknown';
   let endTurn;
   const completed = new Promise((resolve) => { endTurn = resolve; });
-  const records = { firstWorkingMs: null, reportMs: null, reportActivity: null, reportClassification: null, reportActivities: [], reportArgumentShapes: [], reporterTerminalFacts: [], reportCount: 0, firstOperation: null, firstOperationAfterReport: null, firstOperationCompletionMs: null, firstSemantic: null, firstSemanticAfterReport: null, firstSemanticCompletionMs: null, toolFailures: 0, malformedReportCalls: 0 };
+  const records = { firstWorkingMs: null, reportMs: null, reportActivity: null, reportClassification: null, reportActivities: [], reportArgumentShapes: [], reporterTerminalFacts: [], approvalRequests: [], reportCount: 0, firstOperation: null, firstOperationAfterReport: null, firstOperationCompletionMs: null, firstSemantic: null, firstSemanticAfterReport: null, firstSemanticCompletionMs: null, toolFailures: 0, malformedReportCalls: 0 };
   const itemStarts = new Map();
   const failureTypes = {};
   const reporterStatuses = {};
@@ -116,6 +116,7 @@ async function runTask(task, reporting, repetition, root) {
   }
   let reporterConfigured = false;
   let reporterObserved = false;
+  let reporterServerStatus = null;
 
   lines.on('line', (line) => {
     let message;
@@ -128,6 +129,7 @@ async function runTask(task, reporting, repetition, root) {
       return;
     }
     if (message.id !== undefined && message.method) {
+      if (message.method.endsWith('/requestApproval')) records.approvalRequests.push(message.method.split('/').slice(-2).join('/'));
       const result = message.method.endsWith('/requestApproval') ? { decision: 'decline' } : null;
       const response = result
         ? { jsonrpc: '2.0', id: message.id, result }
@@ -156,8 +158,11 @@ async function runTask(task, reporting, repetition, root) {
       reporterStatuses[status] = (reporterStatuses[status] ?? 0) + 1;
       const item = params.item;
       const errorMessage = typeof item.error?.message === 'string' ? item.error.message.toLowerCase() : '';
-      const errorCategory = !errorMessage ? 'none' : /timed? ?out|timeout/.test(errorMessage) ? 'timeout' : /closed|disconnected|exited/.test(errorMessage) ? 'transport' : /protocol|parse|json/.test(errorMessage) ? 'protocol' : /invalid|schema|argument/.test(errorMessage) ? 'validation' : /denied|approval|permission/.test(errorMessage) ? 'permission' : 'other';
-      records.reporterTerminalFacts.push({ status, hasErrorObject: Boolean(item.error && typeof item.error === 'object'), hasErrorMessage: Boolean(errorMessage), hasErrorCode: Number.isInteger(item.error?.code), errorCategory, resultIsError: item.result?.isError === true, hasContent: Array.isArray(item.result?.content) && item.result.content.length > 0 });
+      const errorCategory = !errorMessage ? 'none' : /timed? ?out|timeout/.test(errorMessage) ? 'timeout' : /closed|disconnected|exited|spawn|process/.test(errorMessage) ? 'transport' : /protocol|parse|json/.test(errorMessage) ? 'protocol' : /invalid|schema|argument|result|content/.test(errorMessage) ? 'validation' : /denied|approval|permission/.test(errorMessage) ? 'permission' : /initializ|startup|server/.test(errorMessage) ? 'server_setup' : /mcp.*(tool|call)|tool.*mcp/.test(errorMessage) ? 'mcp_tool_error' : /tool/.test(errorMessage) ? 'tool_execution' : 'other';
+      const errorSignature = !errorMessage ? 'none' : /schema|structured content|output schema|invalid result/.test(errorMessage) ? 'result_schema' : /timed? ?out|timeout/.test(errorMessage) ? 'timeout' : /permission|approval|denied/.test(errorMessage) ? 'permission' : /not found|unknown tool|unavailable/.test(errorMessage) ? 'tool_unavailable' : /process|spawn|exited|closed|disconnected/.test(errorMessage) ? 'server_transport' : /initializ|startup/.test(errorMessage) ? 'server_startup' : /returned.*error|iserror|tool error/.test(errorMessage) ? 'tool_declared_error' : /failed.*tool|tool.*failed|mcp.*fail/.test(errorMessage) ? 'tool_call_failure' : 'unclassified';
+      const safeErrorWords = new Set(['mcp', 'server', 'tool', 'call', 'failed', 'failure', 'error', 'returned', 'result', 'invalid', 'schema', 'content', 'structured', 'timeout', 'timed', 'out', 'process', 'exited', 'closed', 'disconnected', 'spawn', 'permission', 'approval', 'denied', 'unknown', 'unavailable', 'initialize', 'initialization', 'startup', 'protocol', 'response', 'internal']);
+      const errorSignalWords = [...new Set(errorMessage.match(/[a-z]+/g)?.filter((word) => safeErrorWords.has(word)) ?? [])].slice(0, 12);
+      records.reporterTerminalFacts.push({ status, errorKeys: item.error && typeof item.error === 'object' ? Object.keys(item.error).filter((key) => ['code', 'message', 'data'].includes(key)) : [], hasErrorObject: Boolean(item.error && typeof item.error === 'object'), hasErrorMessage: Boolean(errorMessage), hasErrorCode: Number.isInteger(item.error?.code), errorCategory, errorSignature, errorSignalWords, resultIsError: item.result?.isError === true, hasContent: Array.isArray(item.result?.content) && item.result.content.length > 0 });
     }
     if (message.method === 'item/completed' && typeof params.item?.id === 'string' && itemStarts.has(params.item.id)) {
       const id = params.item.id;
@@ -219,6 +224,8 @@ async function runTask(task, reporting, repetition, root) {
       const mcp = await send('mcpServerStatus/list', { threadId, detail: 'toolsAndAuthOnly', serverName: 'azalee_activity' });
       const content = JSON.stringify(mcp);
       reporterConfigured = content.includes('report_activity');
+      const server = Array.isArray(mcp.data) ? mcp.data.find((entry) => entry.name === 'azalee_activity') : null;
+      if (server) reporterServerStatus = { before: { runtimeStatus: ['notStarted', 'starting', 'connected', 'authenticationRequired', 'failed', 'cancelled', 'disabled'].includes(server.runtimeStatus) ? server.runtimeStatus : 'unknown', authStatus: ['unknown', 'unsupported', 'notLoggedIn', 'bearerToken', 'oAuth'].includes(server.authStatus) ? server.authStatus : 'unknown', toolsErrorPresent: typeof server.toolsError === 'string' && server.toolsError.length > 0, advertisedTool: Object.hasOwn(server.tools ?? {}, 'report_activity') }, after: null };
     }
     origin = performance.now();
     const taskText = reporting && reporterConfigured ? `${reportInstruction}${task.prompt}` : task.prompt;
@@ -234,6 +241,13 @@ async function runTask(task, reporting, repetition, root) {
       clearTimeout(timeoutId);
     }
     const durationMs = elapsed(origin);
+    if (reporting && reporterServerStatus) {
+      try {
+        const status = await send('mcpServerStatus/list', { threadId, detail: 'toolsAndAuthOnly', serverName: 'azalee_activity' });
+        const server = Array.isArray(status.data) ? status.data.find((entry) => entry.name === 'azalee_activity') : null;
+        if (server) reporterServerStatus.after = { runtimeStatus: ['notStarted', 'starting', 'connected', 'authenticationRequired', 'failed', 'cancelled', 'disabled'].includes(server.runtimeStatus) ? server.runtimeStatus : 'unknown', toolsErrorPresent: typeof server.toolsError === 'string' && server.toolsError.length > 0, advertisedTool: Object.hasOwn(server.tools ?? {}, 'report_activity') };
+      } catch { reporterServerStatus.after = { requestFailed: true }; }
+    }
     let artifactVerified = null;
     if (task.key === 'coding') artifactVerified = await access(path.join(workspace, 'result.js')).then(() => true, () => false);
     if (task.key === 'writing') artifactVerified = await access(path.join(workspace, 'result.md')).then(() => true, () => false);
@@ -247,6 +261,8 @@ async function runTask(task, reporting, repetition, root) {
       reportedActivities: records.reportActivities,
       reportArgumentShapes: records.reportArgumentShapes,
       reporterTerminalFacts: records.reporterTerminalFacts,
+      approvalRequests: records.approvalRequests,
+      reporterServerStatus,
       correctReportCount: records.reportActivities.filter((category) => category === task.expected).length,
       incorrectReportCount: records.reportActivities.filter((category) => category !== task.expected).length,
       duplicateReports: duplicateReportCount > 0,
@@ -288,7 +304,7 @@ async function main() {
       results.push(await runTask(tasks[0], true, 1, root));
       await writeFile(outputArgument || 'PHASE6-REPORTER-DIAGNOSTIC.json', `${JSON.stringify({ monotonicElapsedMs: true, results }, null, 2)}\n`);
       const result = results[0];
-      console.log(JSON.stringify({ activity: result.activity, reporting: result.reporting, turnStatus: result.turnStatus, reportCount: result.reportCount, reportArgumentShapes: result.reportArgumentShapes, malformedReportCalls: result.malformedReportCalls, reporterToolStatuses: result.reporterToolStatuses, toolFailureTypes: result.toolFailureTypes, artifactVerified: result.artifactVerified }));
+      console.log(JSON.stringify({ activity: result.activity, reporting: result.reporting, turnStatus: result.turnStatus, reportCount: result.reportCount, reportArgumentShapes: result.reportArgumentShapes, reporterTerminalFacts: result.reporterTerminalFacts, approvalRequests: result.approvalRequests, reporterServerStatus: result.reporterServerStatus, malformedReportCalls: result.malformedReportCalls, reporterToolStatuses: result.reporterToolStatuses, toolFailureTypes: result.toolFailureTypes, artifactVerified: result.artifactVerified }));
     } else if (phase6) {
       if (!Number.isInteger(requestedTrials) || requestedTrials < 1 || requestedTrials > 100 || !Number.isInteger(controlTrials) || controlTrials < 1 || controlTrials > 50) throw new Error('Trial counts must be positive integers (activity <= 100, controls <= 50).');
       let state = randomSeed || 1;
