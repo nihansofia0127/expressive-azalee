@@ -51,6 +51,16 @@ collector.subscribe((event) => {
     connectionIndicator.dataset.connected = String(connected);
     connectionIndicator.setAttribute('aria-label', adapterStatus.textContent);
   }
+  if (event.eventType === 'turn.started') {
+    taskMessage.textContent = 'Codex is working.';
+    stopButton.disabled = false;
+  }
+  if (event.eventType === 'tool.started') {
+    taskMessage.textContent = 'Codex is working.';
+  }
+  if (event.eventType === 'approval.required' || event.eventType === 'user_input.required') {
+    stopButton.disabled = false;
+  }
   if (event.eventType === 'connection.failed' || event.eventType === 'turn.failed') {
     taskMessage.textContent = studyRecorder.active ? 'Codex could not complete this task.' : 'Codex could not complete this task. See the latest event in Developer controls.';
     finishTask();
@@ -76,6 +86,30 @@ collector.subscribe((event) => {
     finishTask();
   }
 });
+
+if (window.__TAURI__?.event?.listen) {
+  window.__TAURI__.event.listen('azalee-pet-runtime', ({ payload }) => {
+    showPetRuntimeStatus({ renderer: payload });
+  });
+  window.__TAURI__.event.listen('azalee-presentation-ack', ({ payload }) => {
+    if (!payload || typeof payload.animation !== 'string') return;
+    $('#pet-runtime-status').textContent = `Pet received ${payload.mode} presentation · ${payload.animation}`;
+  });
+}
+
+function showPetRuntimeStatus(status) {
+  if (!status || typeof status !== 'object') return;
+  const renderer = status.renderer;
+  if (!renderer) {
+    $('#pet-runtime-status').textContent = 'Pet window exists; renderer status is pending.';
+    return;
+  }
+  const ready = renderer.atlasLoaded
+    ? `Sprite atlas loaded · canvas ${renderer.canvasWidth}×${renderer.canvasHeight}`
+    : 'Sprite atlas failed to load.';
+  const native = status.visible === undefined ? '' : ` · window ${status.visible ? 'visible' : 'hidden'} at (${status.position?.x ?? '?'}, ${status.position?.y ?? '?'}) · ${status.size?.width ?? '?'}×${status.size?.height ?? '?'}`;
+  $('#pet-runtime-status').textContent = `Pet runtime: ${ready}${native}`;
+}
 
 function renderPresentation() {
   const mode = activeStudy?.condition === 'EXPRESSIVE' ? PresentationMode.EXPRESSIVE : activeStudy ? PresentationMode.BASIC : currentMode;
@@ -104,8 +138,17 @@ function renderPresentation() {
     activity: visible ? displayActivity : 'HIDDEN',
     label: selected.label,
     animation: selected.animation,
-  })?.catch?.(() => {});
-  window.__TAURI__?.core?.invoke('set_pet_visibility', { visible })?.catch?.(() => {});
+  })?.catch?.((error) => {
+    $('#pet-runtime-status').textContent = `Pet update event failed: ${error?.message ?? 'unknown error'}`;
+  });
+  if (window.__TAURI__?.core?.invoke) {
+    window.__TAURI__.core.invoke('set_pet_visibility', { visible })
+      .then(() => window.__TAURI__.core.invoke('pet_runtime_status'))
+      .then(showPetRuntimeStatus)
+      .catch((error) => {
+        $('#pet-runtime-status').textContent = `Pet visibility update failed: ${error?.message ?? 'unknown error'}`;
+      });
+  }
   if (lastPetVisibility !== visible) {
     studyRecorder.petVisibilityChanged(visible);
     lastPetVisibility = visible;
@@ -231,6 +274,7 @@ startButton.addEventListener('click', async () => {
     $('#study-end-header').disabled = studyRecorder.active;
     studyRecorder.userAction('user.task.started', 'WORKING', 'task_submit');
     taskMessage.textContent = 'Starting Codex App Server…';
+    stopButton.disabled = true;
     await codex.startTask(prompt, workspace, $('#activity-reporting').checked);
   } catch (error) {
     taskMessage.textContent = error?.message ?? 'Could not start the Codex task.';
@@ -344,6 +388,11 @@ if (window.__TAURI__?.event?.listen) {
 if (codex.available) {
   try {
     await codex.connect();
+    try {
+      showPetRuntimeStatus(await window.__TAURI__.core.invoke('pet_runtime_status'));
+    } catch {
+      $('#pet-runtime-status').textContent = 'Pet window status unavailable.';
+    }
     adapterStatus.textContent = 'App Server ready';
     $('#task-prompt').placeholder = 'Try: Use the shell tool to run pwd here. Do not edit files.';
   } catch {

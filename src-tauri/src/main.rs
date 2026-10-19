@@ -14,6 +14,9 @@ pub struct RunnerState {
     pub pending_approvals: Arc<Mutex<std::collections::HashMap<String, serde_json::Value>>>,
 }
 
+#[derive(Default)]
+pub struct PetRuntimeState(Mutex<Option<Value>>);
+
 impl Default for RunnerState {
     fn default() -> Self {
         Self {
@@ -253,6 +256,45 @@ fn set_pet_visibility(app: tauri::AppHandle, visible: bool) -> Result<(), String
 }
 
 #[tauri::command]
+fn report_pet_runtime(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, PetRuntimeState>,
+    atlas_loaded: bool,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> Result<(), String> {
+    if window.label() != "pet" || canvas_width > 4096 || canvas_height > 4096 {
+        return Err("Pet runtime status did not pass validation".to_string());
+    }
+    let report = json!({
+        "atlasLoaded": atlas_loaded,
+        "canvasWidth": canvas_width,
+        "canvasHeight": canvas_height
+    });
+    *state.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(report.clone());
+    window.app_handle().emit("azalee-pet-runtime", report)
+        .map_err(|_| "Could not report pet runtime status".to_string())
+}
+
+#[tauri::command]
+fn pet_runtime_status(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, PetRuntimeState>,
+) -> Result<Value, String> {
+    let pet = app.get_webview_window("pet")
+        .ok_or_else(|| "Pet window is unavailable".to_string())?;
+    let position = pet.outer_position().map_err(|_| "Could not inspect pet position".to_string())?;
+    let size = pet.inner_size().map_err(|_| "Could not inspect pet size".to_string())?;
+    let report = state.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Ok(json!({
+        "renderer": report,
+        "visible": pet.is_visible().unwrap_or(false),
+        "position": {"x": position.x, "y": position.y},
+        "size": {"width": size.width, "height": size.height}
+    }))
+}
+
+#[tauri::command]
 fn hide_manager_window(app: tauri::AppHandle) -> Result<(), String> {
     app.emit("manager.visibility.changed", json!({"visible": false}))
         .ok();
@@ -402,6 +444,7 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(RunnerState::default())
+        .manage(PetRuntimeState::default())
         .invoke_handler(tauri::generate_handler![
             default_workspace,
             codex_version,
@@ -414,7 +457,9 @@ fn main() {
             set_pet_visibility,
             hide_manager_window,
             show_manager_window,
-            save_pet_position
+            save_pet_position,
+            report_pet_runtime,
+            pet_runtime_status
         ])
         .setup(|app| {
             configure_pet_window(app.handle())?;

@@ -12,11 +12,31 @@ if (tauri?.event?.listen) {
       try { renderer.setAnimation(payload.animation); } catch { /* Ignore invalid display state. */ }
     }
     if (typeof payload.label === 'string') label.textContent = payload.label;
+    tauri.event.emit('azalee-presentation-ack', {
+      mode: payload.mode,
+      animation: renderer.getAnimation(),
+      visible: payload.visible !== false,
+    }).catch(() => {});
   });
   await tauri.event.listen('azalee-manager-visibility', ({ payload }) => {
     if (payload?.visible) tauri.core.invoke('show_manager_window').catch(() => {});
   });
 }
+
+renderer.ready.then(() => requestAnimationFrame(() => {
+  const canvas = document.querySelector('#azalee-canvas');
+  tauri?.core?.invoke('report_pet_runtime', {
+    atlasLoaded: !renderer.hasLoadError(),
+    canvasWidth: canvas.width,
+    canvasHeight: canvas.height,
+  }).catch(() => {});
+})).catch(() => {
+  tauri?.core?.invoke('report_pet_runtime', {
+    atlasLoaded: false,
+    canvasWidth: 0,
+    canvasHeight: 0,
+  }).catch(() => {});
+});
 
 document.querySelector('#pet-hit-area').addEventListener('mousedown', (event) => {
   if (event.button === 0) currentWindow?.startDragging().catch(() => {});

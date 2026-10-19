@@ -22,6 +22,7 @@ pub struct ActiveSession {
 struct StreamContext {
     session_id: Option<String>,
     turn_id: Option<String>,
+    active_session: Arc<Mutex<Option<ActiveSession>>>,
     sequence: Arc<AtomicU64>,
     activity_report_items: HashSet<String>,
     activity_report_calls: HashSet<String>,
@@ -150,7 +151,7 @@ fn run_task(
     let stdout = child.stdout.take().ok_or_else(|| "Codex App Server stdout was unavailable".to_string())?;
     let writer = Arc::new(Mutex::new(stdin));
     let mut lines = BufReader::new(stdout).lines();
-    let mut context = StreamContext { session_id: None, turn_id: None, sequence: sequence.clone(), activity_report_items: HashSet::new(), activity_report_calls: HashSet::new() };
+    let mut context = StreamContext { session_id: None, turn_id: None, active_session: active.clone(), sequence: sequence.clone(), activity_report_items: HashSet::new(), activity_report_calls: HashSet::new() };
 
     let mut initialize_params = json!({
         "clientInfo": {"name": "expressive_azalee", "title": "Expressive Azalee", "version": "0.1.0"}
@@ -392,7 +393,10 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
     if method == "turn/started" {
         context.activity_report_items.clear();
         context.activity_report_calls.clear();
-        if let Some(turn_id) = server_turn { context.turn_id = Some(turn_id.to_string()); }
+        if let Some(turn_id) = server_turn {
+            context.turn_id = Some(turn_id.to_string());
+            update_active_turn_id(&context.active_session, context.session_id.as_deref(), turn_id);
+        }
     }
     let is_activity_report = item_type == "mcpToolCall"
         && item.get("server").and_then(Value::as_str) == Some("azalee_activity")
@@ -484,6 +488,34 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
     });
     emit_event(app, &context.sequence, context.session_id.clone(), context.turn_id.clone(), event_type, lifecycle, tool_name, request_id, metadata);
     method == "turn/completed"
+}
+
+fn update_active_turn_id(
+    active: &Arc<Mutex<Option<ActiveSession>>>,
+    session_id: Option<&str>,
+    turn_id: &str,
+) {
+    if let Some(session) = active.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        session.turn_id = turn_id_for_session(
+            &session.thread_id,
+            session.turn_id.as_deref(),
+            session_id,
+            turn_id,
+        );
+    }
+}
+
+fn turn_id_for_session(
+    active_thread_id: &str,
+    current_turn_id: Option<&str>,
+    session_id: Option<&str>,
+    turn_id: &str,
+) -> Option<String> {
+    if session_id == Some(active_thread_id) {
+        Some(turn_id.to_string())
+    } else {
+        current_turn_id.map(str::to_string)
+    }
 }
 
 fn accept_report_item(seen: &mut HashSet<String>, item_id: Option<&str>) -> bool {
@@ -651,7 +683,7 @@ fn _workspace_is_absolute(path: &Path) -> bool { path.is_absolute() }
 
 #[cfg(test)]
 mod activity_metadata_tests {
-    use super::{accept_report_item, predicted_activity_from_plan, safe_activity_metadata};
+    use super::{accept_report_item, predicted_activity_from_plan, safe_activity_metadata, turn_id_for_session};
     use std::collections::HashSet;
     use serde_json::json;
 
@@ -697,5 +729,11 @@ mod activity_metadata_tests {
         assert!(!accept_report_item(&mut seen, Some("item-1"))); // Completed items remain deduplicated until the next turn.
         seen.clear(); // Turn start resets report identity scope.
         assert!(accept_report_item(&mut seen, Some("item-1")));
+    }
+
+    #[test]
+    fn turn_start_notification_makes_the_matching_session_interruptible_immediately() {
+        assert_eq!(turn_id_for_session("thread-1", None, Some("thread-1"), "turn-1"), Some("turn-1".into()));
+        assert_eq!(turn_id_for_session("thread-1", Some("turn-1"), Some("stale-thread"), "turn-2"), Some("turn-1".into()));
     }
 }
