@@ -14,10 +14,6 @@
         <div class="brand"><span class="brand-mark" aria-hidden="true">✿</span><span>Azalee</span></div>
         <div class="window-actions"><span id="connection-indicator" class="connection-indicator" aria-label="Codex disconnected"></span><button id="study-end-header" type="button" hidden>End study</button><button id="close-app" class="icon-button" type="button" aria-label="Close Azalee">×</button></div>
       </header>
-      <section class="pet-stage" id="pet-stage" aria-label="Azalee, animated forest cat">
-        <canvas id="azalee-canvas" width="384" height="416" role="img" aria-label="Azalee resting"></canvas>
-        <div class="behavior-label" aria-live="polite"><span class="state-dot"></span><span id="behavior-label">Idle</span></div>
-      </section>
       <section class="mode-toggle" role="group" aria-label="Presentation mode"><span>Mode</span><button type="button" data-mode="Basic" aria-pressed="true">Basic</button><button type="button" data-mode="Expressive" aria-pressed="false">Expressive</button></section>
       <section class="task-panel" aria-label="Start a Codex task">
         <label for="workspace-path">Workspace</label>
@@ -54,7 +50,7 @@
         <div class="dev-actions"><select id="replay-scenario" aria-label="Simulated event scenario"><option value="success">Success</option><option value="failure">Failure</option><option value="interrupted">Interrupted</option><option value="waiting">Approval wait</option></select><button id="replay-events" type="button">Replay events</button></div>
         <label for="activity-fixture">Synthetic classification fixture</label>
         <div class="dev-actions"><select id="activity-fixture" aria-label="Synthetic activity fixture"></select><button id="classify-fixture" type="button">Classify</button></div>
-        <section class="classification-debug" aria-label="Classification debugging"><h2>Classification debug</h2><p>Presentation mode: <strong id="debug-mode">Basic</strong> · Selected animation: <strong id="debug-animation">idle</strong></p><p>Rule result: <strong id="debug-classification">IDLE</strong></p><p>Evidence: <span id="debug-evidence">Waiting for an event.</span></p><p id="event-provenance">No event received.</p></section>
+      <section class="classification-debug" aria-label="Classification debugging"><h2>Classification debug</h2><p>Presentation mode: <strong id="debug-mode">Basic</strong> · Selected animation: <strong id="debug-animation">idle</strong></p><p>Rule result: <strong id="debug-classification">IDLE</strong></p><p>Evidence: <span id="debug-evidence">Waiting for an event.</span></p><p id="event-provenance">No event received.</p></section>
         <p id="connection-status" class="connection-status">App Server disconnected</p>
         <pre id="last-event" aria-label="Latest normalized event">No agent event yet</pre>
         <p>Events shown here contain normalized status and tool metadata only; prompts, command text, and outputs are omitted.</p>

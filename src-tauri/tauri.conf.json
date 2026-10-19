@@ -15,15 +15,15 @@
       {
         "label": "main",
         "title": "Azalee",
-        "width": 380,
-        "height": 570,
+        "width": 520,
+        "height": 720,
         "minWidth": 340,
         "minHeight": 520,
         "resizable": true,
         "decorations": false,
-        "transparent": true,
-        "alwaysOnTop": true,
-        "shadow": false,
+        "transparent": false,
+        "alwaysOnTop": false,
+        "shadow": true,
         "skipTaskbar": false,
         "visible": true
       }

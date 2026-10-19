@@ -1,5 +1,5 @@
 import { Behavior, behaviorLabels } from './agent-state.js';
-import { animationRows, createAzaleeRenderer } from './azalee-renderer.js';
+import { animationRows } from './azalee-renderer.js';
 import { createAnimationController } from './animation-controller.js';
 import { createEventCollector } from './event-collector.js';
 import { createStateMapper } from './state-mapper.js';
@@ -10,8 +10,6 @@ import { activityFixtures } from './activity-fixtures.js';
 import { createStudyRecorder } from './study-recorder.js';
 
 const $ = (selector) => document.querySelector(selector);
-const renderer = createAzaleeRenderer($('#azalee-canvas'));
-const label = $('#behavior-label');
 const adapterStatus = $('#connection-status');
 const startButton = $('#start-task');
 const stopButton = $('#stop-task');
@@ -27,10 +25,13 @@ let studyOutputPath = null;
 let latestClassification = { activity: 'IDLE', explanation: 'Waiting for an event.', evidence: [] };
 let latestEvent = null;
 
-const animation = createAnimationController(renderer, (behavior) => {
-  label.textContent = behaviorLabels[behavior];
+let selectedAnimation = 'idle';
+const animation = createAnimationController({
+  setAnimation(name) { selectedAnimation = name; },
+  getAnimation() { return selectedAnimation; },
+  setSpeed() {},
+}, (behavior) => {
   $('#dev-behavior').textContent = behaviorLabels[behavior];
-  $('#azalee-canvas').setAttribute('aria-label', `Azalee ${behaviorLabels[behavior].toLowerCase()}`);
 });
 const stateMapper = createStateMapper((behavior) => animation.setBehavior(behavior));
 const codex = createCodexAdapter({ onEvent: (event) => collector.accept(event) });
@@ -94,11 +95,23 @@ function renderPresentation() {
   $('#event-provenance').textContent = latestEvent
     ? latestEvent.metadata.synthetic ? 'Synthetic fixture — not verified against real Codex execution.' : `Observed event from ${latestEvent.agentType}.`
     : 'No event received.';
-  $('#azalee-canvas').setAttribute('aria-label', `Azalee ${selected.label.toLowerCase()}`);
   const semantic = ['CODING', 'PAINTING', 'WRITING', 'EMAILING', 'DELETING'].includes(latestClassification.activity);
   const displayActivity = mode === PresentationMode.EXPRESSIVE && semantic ? latestClassification.activity : selected.behavior;
   studyRecorder.display({ classification: latestClassification, mode, label: selected.label, animation: selected.animation, visible, displayActivity });
+  window.__TAURI__?.event?.emit('azalee-presentation', {
+    visible,
+    mode,
+    activity: visible ? displayActivity : 'HIDDEN',
+    label: selected.label,
+    animation: selected.animation,
+  })?.catch?.(() => {});
+  window.__TAURI__?.core?.invoke('set_pet_visibility', { visible })?.catch?.(() => {});
+  if (lastPetVisibility !== visible) {
+    studyRecorder.petVisibilityChanged(visible);
+    lastPetVisibility = visible;
+  }
 }
+let lastPetVisibility = null;
 
 function finishTask() {
   startButton.disabled = false;
@@ -123,7 +136,7 @@ $('#animation-select').addEventListener('change', (event) => {
   const name = event.currentTarget.value;
   animation.playAnimation(name);
   $('#debug-animation').textContent = animation.getAnimation();
-  $('#azalee-canvas').setAttribute('aria-label', `Azalee ${animationRows[name].label.toLowerCase()} animation`);
+  window.__TAURI__?.event?.emit('azalee-presentation', { visible: true, mode: currentMode, activity: 'WORKING', label: animationRows[name].label, animation: name })?.catch?.(() => {});
 });
 for (const button of document.querySelectorAll('[data-mode]')) {
   button.addEventListener('click', () => {
@@ -312,12 +325,19 @@ async function endStudySession() {
 }
 $('#study-end-header').addEventListener('click', endStudySession);
 
-$('#close-app').addEventListener('click', () => window.__TAURI__?.window?.getCurrentWindow?.().close());
-for (const element of [$('#drag-bar'), $('#pet-stage')]) {
+$('#close-app').addEventListener('click', () => window.__TAURI__?.core?.invoke('hide_manager_window').catch(() => {}));
+for (const element of [$('#drag-bar')]) {
   element.addEventListener('mousedown', (event) => {
     if (event.button === 0 && !event.target.closest('button, input, textarea, select, summary')) {
       window.__TAURI__?.window?.getCurrentWindow?.().startDragging();
     }
+  });
+}
+
+if (window.__TAURI__?.event?.listen) {
+  window.__TAURI__.event.listen('azalee-pet-position-changed', () => studyRecorder.petPositionChanged());
+  window.__TAURI__.event.listen('manager.visibility.changed', ({ payload }) => {
+    if (typeof payload?.visible === 'boolean') studyRecorder.managerVisibilityChanged(payload.visible);
   });
 }
 

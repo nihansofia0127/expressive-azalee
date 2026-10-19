@@ -1,11 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Azalee window controls for the main companion window.",
-  "windows": ["main"],
+  "description": "Manager and floating pet window permissions.",
+  "windows": ["main", "pet"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:event:allow-emit",
+    "core:event:allow-listen"
   ]
 }

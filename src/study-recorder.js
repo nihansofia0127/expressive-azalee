@@ -6,6 +6,7 @@ const studyEventTypes = new Set([
   'activity.intent.abandoned', 'activity.confirmed', 'activity.reporter.unavailable',
   'activity.display.started', 'activity.display.ended', 'user.mode.changed',
   'user.task.started', 'user.interruption.initiated', 'user.approval.responded', 'study.write.failed',
+  'pet.visibility.changed', 'pet.position.changed', 'manager.visibility.changed',
 ]);
 const toolTypeMap = Object.freeze({ commandExecution: 'shell', fileChange: 'file_change', mcpToolCall: 'mcp', dynamicToolCall: 'dynamic_tool', collabToolCall: 'collab_tool' });
 
@@ -68,6 +69,9 @@ export function createStudyRecorder({ append, now = () => Date.now(), performanc
       safe({ eventType: 'activity.display.started', turnIndex, activity, stage: classification.stage, evidenceSource: classification.evidenceSource, predicted: classification.predicted, displayMode: mode, displayLabel: label, animation: visible ? animation : 'hidden' });
     },
     modeChanged(mode) { if (study) safe({ eventType: 'user.mode.changed', turnIndex, displayMode: mode }); },
+    petVisibilityChanged(visible) { if (study) safe({ eventType: 'pet.visibility.changed', turnIndex, activity: visible ? 'VISIBLE' : 'HIDDEN' }); },
+    petPositionChanged() { if (study) safe({ eventType: 'pet.position.changed', turnIndex, reason: 'dragged' }); },
+    managerVisibilityChanged(visible) { if (study) safe({ eventType: 'manager.visibility.changed', turnIndex, activity: visible ? 'VISIBLE' : 'HIDDEN' }); },
     lifecycleTransitions(items, index = turnIndex) {
       if (!study) return;
       for (const item of items ?? []) safe({ eventType: item.type, turnIndex: index, activity: item.activity, reason: item.reason, evidenceSource: item.evidenceSource, stage: item.stage, duplicateCount: item.type === 'activity.intent.duplicate' ? 1 : undefined });

@@ -166,6 +166,24 @@ test('participant-visible study states record generic Basic and hidden No Avatar
   assert.equal(rows.at(-1).animation, 'hidden');
 });
 
+test('window presentation changes are logged without storing screen coordinates', async () => {
+  const rows = [];
+  const recorder = createStudyRecorder({ append: async (row) => rows.push(row), now: () => 3, performanceNow: () => 3 });
+  recorder.start({ id: 'window-study', condition: 'BASIC', reportingEnabled: false, taskId: 'window-test' });
+  recorder.petVisibilityChanged(false);
+  recorder.petVisibilityChanged(true);
+  recorder.petPositionChanged();
+  recorder.managerVisibilityChanged(false);
+  await recorder.flush();
+  assert.deepEqual(rows.map((row) => row.eventType), [
+    'pet.visibility.changed', 'pet.visibility.changed', 'pet.position.changed', 'manager.visibility.changed',
+  ]);
+  assert.equal(rows[0].activity, 'HIDDEN');
+  assert.equal(rows[2].reason, 'dragged');
+  assert.equal(Object.hasOwn(rows[2], 'x'), false);
+  assert.equal(Object.hasOwn(rows[2], 'y'), false);
+});
+
 test('write failures are exposed to the UI instead of being reported as successful study recording', async () => {
   const recorder = createStudyRecorder({ append: async () => { throw new Error('disk full'); }, now: () => 1, performanceNow: () => 1 });
   recorder.start({ id: '123e4567-e89b-12d3-a456-426614174003', condition: 'BASIC', reportingEnabled: false, taskId: 'T3' });
