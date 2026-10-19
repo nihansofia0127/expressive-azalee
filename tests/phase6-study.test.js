@@ -4,6 +4,7 @@ import { createActivityLifecycle } from '../src/activity-lifecycle.js';
 import { Activity } from '../src/activity-classifier.js';
 import { PresentationMode, presentActivity } from '../src/presentation-mode.js';
 import { createStudyRecorder } from '../src/study-recorder.js';
+import { createEventCollector } from '../src/event-collector.js';
 
 const intent = (activity, turnId = 't1') => ({ eventId: `i-${Math.random()}`, eventType: 'activity.intent', lifecycleStatus: 'intended', turnId, metadata: { activity: { category: activity, stage: 'intended', predicted: true, evidenceSource: 'agent_report', evidenceStrength: 'reported' } } });
 const op = (type, id, eventType = 'tool.started', status = 'in_progress', activity = {}) => ({ eventId: `${id}-${eventType}`, requestId: id, turnId: 't1', eventType, lifecycleStatus: status, toolName: 'shell', metadata: { itemType: type, status, activity } });
@@ -11,10 +12,53 @@ const op = (type, id, eventType = 'tool.started', status = 'in_progress', activi
 test('identical unresolved reports are recorded as duplicates and do not replace the current intent', () => {
   const lifecycle = createActivityLifecycle();
   lifecycle.apply({ eventType: 'turn.started', turnId: 't1', metadata: {} });
-  lifecycle.apply(intent(Activity.CODING));
+  lifecycle.apply({ ...intent(Activity.CODING), requestId: 'call-1' });
   assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.received']);
   assert.equal(lifecycle.apply(intent(Activity.CODING)).duplicateReport, true);
   assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.duplicate']);
+});
+
+test('App Server dynamic-tool report events enter the same privacy-filtered lifecycle', () => {
+  const collector = createEventCollector();
+  const lifecycle = createActivityLifecycle();
+  lifecycle.apply({ eventType: 'turn.started', turnId: 't1', metadata: {} });
+  lifecycle.takeTransitions();
+  let latest;
+  collector.subscribe((event) => { latest = lifecycle.apply(event); });
+  assert.equal(collector.accept({
+    eventId: 'dynamic-report-1', timestamp: 1, agentType: 'codex', sessionId: 's1', turnId: 't1',
+    eventType: 'activity.intent', lifecycleStatus: 'intended', toolName: 'azalee_report_activity', requestId: 'call-1',
+    metadata: { sourceMethod: 'item/tool/call', itemType: 'dynamicToolCall', activity: { category: 'CODING', stage: 'intended', predicted: true, evidenceSource: 'agent_report', evidenceStrength: 'reported' }, arguments: { private: 'must not be retained' } },
+  }), true);
+  assert.equal(latest.activity, Activity.CODING);
+  assert.equal(latest.predicted, true);
+  assert.equal(collector.getLatest().metadata.itemType, 'dynamicToolCall');
+  assert.equal(JSON.stringify(collector.getLatest()).includes('private'), false);
+  assert.equal(collector.accept({
+    eventId: 'dynamic-report-2', timestamp: 2, agentType: 'codex', sessionId: 's1', turnId: 't1',
+    eventType: 'activity.intent', lifecycleStatus: 'intended', toolName: 'azalee_report_activity',
+    metadata: { sourceMethod: 'item/tool/call', itemType: 'dynamicToolCall', activity: { category: 'CODING', stage: 'intended', predicted: true, evidenceSource: 'agent_report', evidenceStrength: 'reported' } },
+  }), true);
+  assert.equal(latest.duplicateReport, true);
+});
+
+test('reporter tool completion preserves its intent until operation evidence arrives', () => {
+  const lifecycle = createActivityLifecycle();
+  lifecycle.apply({ eventType: 'turn.started', turnId: 't1', metadata: {} });
+  lifecycle.apply({ eventType: 'tool.started', turnId: 't1', requestId: 'call-1', toolName: 'azalee_report_activity', lifecycleStatus: 'in_progress', metadata: { itemType: 'dynamicToolCall' } });
+  lifecycle.takeTransitions();
+  lifecycle.apply({ ...intent(Activity.CODING), requestId: 'call-1' });
+  lifecycle.takeTransitions();
+  const completedReporter = { eventType: 'tool.completed', turnId: 't1', requestId: 'call-1', toolName: 'azalee_report_activity', lifecycleStatus: 'completed', metadata: { itemType: 'dynamicToolCall' } };
+  const stillIntended = lifecycle.apply(completedReporter);
+  assert.equal(stillIntended.activity, Activity.CODING);
+  assert.equal(stillIntended.predicted, true);
+  assert.deepEqual(lifecycle.takeTransitions(), []);
+  const duplicate = lifecycle.apply(intent(Activity.CODING));
+  assert.equal(duplicate.duplicateReport, true);
+  assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.duplicate']);
+  lifecycle.apply({ eventType: 'item.started', turnId: 't1', metadata: { itemType: 'fileChange', activity: { artifactExtensions: ['js'], changeKinds: ['add'] } } });
+  assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.confirmed']);
 });
 
 test('different reports supersede, and repeated activity after confirmation is a new intent', () => {
@@ -29,18 +73,30 @@ test('different reports supersede, and repeated activity after confirmation is a
   assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.received']);
 });
 
-test('unmatched completed operations abandon intent; failure and waiting states take precedence', () => {
+test('ambiguous completed operations preserve intent; failure and waiting states take precedence', () => {
   const lifecycle = createActivityLifecycle();
   lifecycle.apply({ eventType: 'turn.started', turnId: 't1', metadata: {} });
   lifecycle.apply(intent(Activity.CODING)); lifecycle.takeTransitions();
   lifecycle.apply(op('commandExecution', 'shell-1'));
-  lifecycle.apply(op('commandExecution', 'shell-1', 'tool.completed', 'completed'));
-  assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.abandoned']);
+  const stillIntended = lifecycle.apply(op('commandExecution', 'shell-1', 'tool.completed', 'completed'));
+  assert.equal(stillIntended.activity, Activity.CODING);
+  assert.equal(stillIntended.predicted, true);
+  assert.deepEqual(lifecycle.takeTransitions(), []);
   assert.equal(lifecycle.apply({ eventType: 'approval.required', turnId: 't1', lifecycleStatus: 'waiting', metadata: {} }).activity, Activity.WAITING);
   lifecycle.apply(intent(Activity.WRITING)); lifecycle.takeTransitions();
   const failed = lifecycle.apply({ eventType: 'turn.failed', turnId: 't1', lifecycleStatus: 'failed', metadata: {} });
   assert.equal(failed.activity, Activity.FAILED);
   assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.abandoned']);
+});
+
+test('repeated report after generic tool activity is a duplicate and cannot restart intent', () => {
+  const lifecycle = createActivityLifecycle();
+  lifecycle.apply({ eventType: 'turn.started', turnId: 't1', metadata: {} });
+  lifecycle.apply(intent(Activity.WRITING)); lifecycle.takeTransitions();
+  lifecycle.apply(op('commandExecution', 'shell-2')); lifecycle.takeTransitions();
+  lifecycle.apply(op('commandExecution', 'shell-2', 'tool.completed', 'completed')); lifecycle.takeTransitions();
+  assert.equal(lifecycle.apply(intent(Activity.WRITING)).duplicateReport, true);
+  assert.deepEqual(lifecycle.takeTransitions().map((x) => x.type), ['activity.intent.duplicate']);
 });
 
 test('turn and session resets abandon pending intent and reject stale reports', () => {

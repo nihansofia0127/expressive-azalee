@@ -9,7 +9,7 @@
     "tauri": "tauri",
     "tauri:build": "tauri build",
     "test": "node --test",
-    "check": "node --check src/main.js && node --check src/agent-state.js && node --check src/event-collector.js && node --check src/state-mapper.js && node --check src/activity-classifier.js && node --check src/activity-lifecycle.js && node --check src/presentation-mode.js && node --check src/study-recorder.js && node --check src/animation-controller.js && node --check src/azalee-renderer.js && node --check src/codex-adapter.js && node --check scripts/validate-phase5-activity-reporting.mjs"
+    "check": "node --check src/main.js && node --check src/agent-state.js && node --check src/event-collector.js && node --check src/state-mapper.js && node --check src/activity-classifier.js && node --check src/activity-lifecycle.js && node --check src/presentation-mode.js && node --check src/study-recorder.js && node --check src/animation-controller.js && node --check src/azalee-renderer.js && node --check src/codex-adapter.js && node --check scripts/validate-phase5-activity-reporting.mjs && node --check scripts/validate-phase6.6-reporting.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.3"

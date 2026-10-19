@@ -24,6 +24,7 @@ struct StreamContext {
     turn_id: Option<String>,
     sequence: Arc<AtomicU64>,
     activity_report_items: HashSet<String>,
+    activity_report_calls: HashSet<String>,
 }
 
 pub fn default_workspace() -> Result<String, String> {
@@ -138,20 +139,6 @@ fn run_task(
     let codex = resolve_codex_binary()?;
     let mut command = Command::new(codex);
     command.args(["app-server", "--listen", "stdio://"]);
-    if activity_reporting {
-        let reporter = std::env::current_exe().map_err(|_| "Could not locate the Azalee activity reporter".to_string())?;
-        let reporter = reporter.to_string_lossy().to_string();
-        let toml_command = serde_json::to_string(&reporter).map_err(|_| "Could not configure the activity reporter".to_string())?;
-        command.args([
-            "-c".to_string(), format!("mcp_servers.azalee_activity.command={toml_command}"),
-            "-c".to_string(), "mcp_servers.azalee_activity.args=[\"--azalee-activity-mcp\"]".to_string(),
-            "-c".to_string(), "mcp_servers.azalee_activity.enabled=true".to_string(),
-            "-c".to_string(), "mcp_servers.azalee_activity.enabled_tools=[\"report_activity\"]".to_string(),
-            "-c".to_string(), "mcp_servers.azalee_activity.default_tools_approval_mode=\"auto\"".to_string(),
-            "-c".to_string(), "mcp_servers.azalee_activity.startup_timeout_sec=3".to_string(),
-            "-c".to_string(), "mcp_servers.azalee_activity.tool_timeout_sec=2".to_string(),
-        ]);
-    }
     let mut child = command
         .current_dir(&workspace)
         .stdin(Stdio::piped())
@@ -163,21 +150,29 @@ fn run_task(
     let stdout = child.stdout.take().ok_or_else(|| "Codex App Server stdout was unavailable".to_string())?;
     let writer = Arc::new(Mutex::new(stdin));
     let mut lines = BufReader::new(stdout).lines();
-    let mut context = StreamContext { session_id: None, turn_id: None, sequence: sequence.clone(), activity_report_items: HashSet::new() };
+    let mut context = StreamContext { session_id: None, turn_id: None, sequence: sequence.clone(), activity_report_items: HashSet::new(), activity_report_calls: HashSet::new() };
 
-    send_request(&writer, 1, "initialize", json!({
+    let mut initialize_params = json!({
         "clientInfo": {"name": "expressive_azalee", "title": "Expressive Azalee", "version": "0.1.0"}
-    }))?;
+    });
+    if activity_reporting {
+        initialize_params["capabilities"] = json!({"experimentalApi": true});
+    }
+    send_request(&writer, 1, "initialize", initialize_params)?;
     let _ = wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, 1)?;
     send_json(&writer, &json!({"method": "initialized", "params": {}}))?;
     emit_event(app, &context.sequence, None, None, "connection.state", Some("connected"), None, None, json!({"adapter": "codex-app-server"}));
 
     let workspace_text = workspace.to_string_lossy().to_string();
-    send_request(&writer, 2, "thread/start", json!({
+    let mut thread_params = json!({
         "cwd": workspace_text,
         "approvalPolicy": "on-request",
         "sandbox": "workspace-write"
-    }))?;
+    });
+    if activity_reporting {
+        thread_params["dynamicTools"] = json!([activity_reporter::dynamic_tool_definition()]);
+    }
+    send_request(&writer, 2, "thread/start", thread_params)?;
     let started = wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, 2)?;
     let thread_id = started
         .pointer("/thread/id")
@@ -198,21 +193,9 @@ fn run_task(
         "excludeTmpdirEnvVar": true,
         "excludeSlashTmp": true
     });
-    let mut reporter_available = activity_reporting;
-    let mut turn_request_id = 3;
-    if activity_reporting {
-        turn_request_id = 4;
-        let status_request = send_request(&writer, 3, "mcpServerStatus/list", json!({ "threadId": thread_id, "detail": "toolsAndAuthOnly", "serverName": "azalee_activity" }));
-        let status_result = if status_request.is_ok() {
-            wait_for_response(app, &mut child, &mut lines, &writer, &mut context, pending, 3).ok()
-        } else { None };
-        reporter_available = status_result.map(|value| value.to_string().contains("report_activity")).unwrap_or(false);
-        if !reporter_available {
-            emit_event(app, &context.sequence, context.session_id.clone(), None, "activity.reporter.unavailable", Some("failed"), None, None, json!({ "sourceMethod": "mcpServerStatus/list", "itemType": "mcpToolCall", "reason": "reporter_not_advertised" }));
-        }
-    }
-    let turn_prompt = if reporter_available {
-        format!("Azalee activity reporting is enabled for this task. Immediately before beginning a code-file creation or modification, call the report_activity MCP tool with activity CODING and stage intended. Immediately before beginning prose/document creation or modification, use WRITING. Immediately before beginning a file deletion, use DELETING. Do not report generic or ambiguous work; no report leaves Azalee at Working. Report only an operation you are about to perform; this reports intent and does not confirm that it happened. Then perform the task normally.\n\nTask:\n{prompt}")
+    let turn_request_id = 3;
+    let turn_prompt = if activity_reporting {
+        format!("Azalee activity reporting is enabled for this task. Immediately before beginning a code-file creation or modification, call the azalee_report_activity tool with activity CODING and stage intended. Immediately before beginning prose/document creation or modification, use WRITING. Immediately before beginning a file deletion, use DELETING. Do not report generic or ambiguous work; no report leaves Azalee at Working. Report only an operation you are about to perform; this reports intent and does not confirm that it happened. Then perform the task normally.\n\nTask:\n{prompt}")
     } else { prompt };
     send_request(&writer, turn_request_id, "turn/start", json!({
         "threadId": thread_id,
@@ -241,7 +224,7 @@ fn run_task(
             Ok(message) => message,
             Err(_) => continue,
         };
-        if handle_server_request(app, &context, pending, &message) {
+        if handle_server_request(app, &mut context, pending, &writer, &message) {
             continue;
         }
         if message.get("id").is_some() && message.get("method").is_none() {
@@ -295,7 +278,7 @@ fn wait_for_response(
             }
             return message.get("result").cloned().ok_or_else(|| "Codex App Server returned no result".to_string());
         }
-        if handle_server_request(app, context, pending, &message) {
+        if handle_server_request(app, context, pending, writer, &message) {
             continue;
         }
         if message.get("method").and_then(Value::as_str).is_some() {
@@ -307,13 +290,51 @@ fn wait_for_response(
 
 fn handle_server_request(
     app: &AppHandle,
-    context: &StreamContext,
+    context: &mut StreamContext,
     pending: &Arc<Mutex<HashMap<String, Value>>>,
+    writer: &Arc<Mutex<ChildStdin>>,
     message: &Value,
 ) -> bool {
     let Some(method) = message.get("method").and_then(Value::as_str) else { return false; };
     let Some(id) = message.get("id").cloned() else { return false; };
-    if method.ends_with("/requestApproval") {
+    if method == "item/tool/call" {
+        let params = message.get("params").unwrap_or(&Value::Null);
+        if params.get("tool").and_then(Value::as_str) != Some(activity_reporter::DYNAMIC_TOOL) { return false; }
+        let call_id = params.get("callId").and_then(Value::as_str).unwrap_or("");
+        let valid_report = context.session_id.as_deref().and_then(|session_id| context.turn_id.as_deref().map(|turn_id| {
+            activity_reporter::validated_dynamic_report(params, session_id, turn_id, &mut context.activity_report_calls)
+        })).flatten();
+        let (success, content) = if let Some((category, stage, call_id)) = valid_report {
+            let event_emitted = emit_event(
+                app,
+                &context.sequence,
+                context.session_id.clone(),
+                context.turn_id.clone(),
+                "activity.intent",
+                Some(stage),
+                Some("azalee_report_activity".to_string()),
+                Some(call_id),
+                json!({"sourceMethod": method, "itemType": "dynamicToolCall", "activity": {
+                    "category": category,
+                    "evidenceSource": "agent_report",
+                    "evidenceStrength": "reported",
+                    "stage": stage,
+                    "predicted": true
+                }}),
+            );
+            (event_emitted, if event_emitted { "Activity intent recorded; it is not confirmation that the operation occurred." } else { "Azalee could not deliver the activity event." })
+        } else {
+            (false, "Invalid, stale, or duplicate activity report.")
+        };
+        let _ = send_json(writer, &json!({"id": id, "result": {
+            "success": success,
+            "contentItems": [{"type": "inputText", "text": content}]
+        }}));
+        if !success {
+            emit_event(app, &context.sequence, context.session_id.clone(), context.turn_id.clone(), "activity.reporter.unavailable", Some("failed"), Some("azalee_report_activity".to_string()), if call_id.is_empty() { None } else { Some(call_id.to_string()) }, json!({"sourceMethod": method, "itemType": "dynamicToolCall", "reason": "invalid_or_undelivered_report"}));
+        }
+        true
+    } else if method.ends_with("/requestApproval") {
         let request_id = id.to_string();
         pending.lock().unwrap_or_else(|e| e.into_inner()).insert(request_id.clone(), id);
         let item_id = message.pointer("/params/itemId").and_then(Value::as_str).map(str::to_string);
@@ -370,6 +391,7 @@ fn process_notification(app: &AppHandle, context: &mut StreamContext, message: &
     let server_turn = params.pointer("/turn/id").and_then(Value::as_str).or_else(|| params.get("turnId").and_then(Value::as_str));
     if method == "turn/started" {
         context.activity_report_items.clear();
+        context.activity_report_calls.clear();
         if let Some(turn_id) = server_turn { context.turn_id = Some(turn_id.to_string()); }
     }
     let is_activity_report = item_type == "mcpToolCall"
@@ -581,9 +603,9 @@ fn emit_event(
     tool_name: Option<String>,
     request_id: Option<String>,
     metadata: Value,
-) {
+) -> bool {
     let event: NormalizedEvent = new_event(sequence, session_id, turn_id, event_type, status.map(str::to_string), tool_name, request_id, metadata);
-    let _ = app.emit(EVENT_NAME, event);
+    app.emit(EVENT_NAME, event).is_ok()
 }
 
 fn send_request(writer: &Arc<Mutex<ChildStdin>>, id: u64, method: &str, params: Value) -> Result<(), String> {

@@ -3,10 +3,45 @@
 //! process itself stores and transmits no task content.
 
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 
 const ACTIVITY_TOOL: &str = "report_activity";
+pub const DYNAMIC_TOOL: &str = "azalee_report_activity";
 const ACTIVITIES: [&str; 3] = ["CODING", "WRITING", "DELETING"];
+
+pub fn dynamic_tool_definition() -> Value {
+    json!({
+        "type": "function",
+        "name": DYNAMIC_TOOL,
+        "description": "Immediately before a matching code, prose/document, or file deletion operation, report its semantic category and stage intended. This is an unverified intention only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "activity": {"type": "string", "enum": ACTIVITIES},
+                "stage": {"type": "string", "enum": ["intended"]}
+            },
+            "required": ["activity", "stage"],
+            "additionalProperties": false
+        }
+    })
+}
+
+pub fn validated_dynamic_report(
+    params: &Value,
+    active_thread_id: &str,
+    active_turn_id: &str,
+    seen_call_ids: &mut HashSet<String>,
+) -> Option<(&'static str, &'static str, String)> {
+    if params.get("threadId")?.as_str()? != active_thread_id { return None; }
+    if params.get("turnId")?.as_str()? != active_turn_id { return None; }
+    if params.get("tool")?.as_str()? != DYNAMIC_TOOL { return None; }
+    let call_id = params.get("callId")?.as_str()?;
+    if call_id.is_empty() || call_id.len() > 128 || seen_call_ids.len() >= 256 || seen_call_ids.contains(call_id) { return None; }
+    let (activity, stage) = validated_report(params.get("arguments")?)?;
+    seen_call_ids.insert(call_id.to_string());
+    Some((activity, stage, call_id.to_string()))
+}
 
 pub fn run() -> i32 {
     let stdin = io::stdin();
@@ -104,7 +139,8 @@ fn call_tool(request: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{call_tool, validated_report};
+    use super::{call_tool, dynamic_tool_definition, validated_dynamic_report, validated_report, DYNAMIC_TOOL};
+    use std::collections::HashSet;
     use serde_json::json;
 
     #[test]
@@ -132,5 +168,34 @@ mod tests {
         assert_eq!(result["isError"], false);
         assert_eq!(result["structuredContent"], json!({"activity":"CODING","stage":"intended"}));
         assert_eq!(result["content"][0]["text"], "{\"activity\":\"CODING\",\"stage\":\"intended\"}");
+    }
+
+    #[test]
+    fn dynamic_tool_has_the_allowlisted_turn_scoped_contract() {
+        let definition = dynamic_tool_definition();
+        assert_eq!(definition["name"], DYNAMIC_TOOL);
+        assert_eq!(definition["type"], "function");
+        assert_eq!(definition["inputSchema"]["properties"]["activity"]["enum"], json!(["CODING", "WRITING", "DELETING"]));
+    }
+
+    #[test]
+    fn dynamic_reports_require_the_active_thread_turn_and_a_unique_call_id() {
+        let valid = json!({
+            "threadId":"thread-1", "turnId":"turn-1", "callId":"call-1", "tool":DYNAMIC_TOOL,
+            "arguments":{"activity":"CODING", "stage":"intended"}
+        });
+        let mut seen = HashSet::new();
+        assert_eq!(validated_dynamic_report(&valid, "thread-1", "turn-1", &mut seen), Some(("CODING", "intended", "call-1".to_string())));
+        assert_eq!(validated_dynamic_report(&valid, "thread-1", "turn-1", &mut seen), None);
+
+        for params in [
+            json!({"threadId":"stale", "turnId":"turn-1", "callId":"call-2", "tool":DYNAMIC_TOOL, "arguments":{"activity":"WRITING","stage":"intended"}}),
+            json!({"threadId":"thread-1", "turnId":"stale", "callId":"call-3", "tool":DYNAMIC_TOOL, "arguments":{"activity":"WRITING","stage":"intended"}}),
+            json!({"threadId":"thread-1", "turnId":"turn-1", "callId":"call-4", "tool":DYNAMIC_TOOL, "arguments":{"activity":"EMAILING","stage":"intended"}}),
+            json!({"threadId":"thread-1", "turnId":"turn-1", "callId":"call-5", "tool":DYNAMIC_TOOL, "arguments":{"activity":"DELETING","stage":"confirmed"}}),
+            json!({"threadId":"thread-1", "turnId":"turn-1", "callId":"call-6", "tool":DYNAMIC_TOOL, "arguments":{"activity":"DELETING","stage":"intended","path":"private"}}),
+        ] {
+            assert_eq!(validated_dynamic_report(&params, "thread-1", "turn-1", &mut seen), None);
+        }
     }
 }
